@@ -1,0 +1,9 @@
+[Unit]
+Description=LCD Statistics Viewer
+
+[Service]
+ExecStart=/home/alex/DisplayControl/.venv/bin/python /home/alex/DisplayControl/lcdstats.py
+WorkingDirectory=/home/alex/DisplayControl
+
+[Install]
+WantedBy=multi-user.target
