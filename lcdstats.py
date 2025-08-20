@@ -58,33 +58,41 @@ try:
         FontBig = ImageFont.truetype("./Font/Font02.ttf",40)
         Font = ImageFont.truetype("./Font/Font02.ttf",25)
         SmallFont = ImageFont.truetype("./Font/Font02.ttf",18)
-
-        text = collector.Hostname
-        draw.text((5, 5), text, fill = "WHITE", font=FontBig)
         
         text = str(datetime.datetime.now().strftime('%m-%d-%Y %H:%M:%S'))
-        draw.text((5, 44), text, fill = "YELLOW",font=Font)
-
-        text = collector.WIFI_SSID
-        draw.text((5, 75), text, fill = "GREEN",font=Font)
+        draw.text((5, 5), text, fill = "WHITE",font=Font)
 
         text = collector.IPAddr
-        draw.text((5, 100), text, fill = "GREEN",font=Font)
+        draw.text((5, 35), text, fill = "YELLOW",font=Font)
 
-        text = "CPU: " + collector.CPUUsage + "   " + collector.CPUTemp
-        draw.text((5, 150), text, fill = "GREEN",font=SmallFont)
+        if collector._WIFI_QUALITY != "":
+            text = collector.WIFI_SSID
+            draw.text((5, 70), text, fill = "GREEN",font=Font)
 
-        text = "Mem: " + collector.MemUsage
-        draw.text((5, 175), text, fill = "GREEN",font=SmallFont)
+            text = collector._WIFI_QUALITY + "%  " + collector._WIFI_RSSI
+            draw.text((5, 95), text, fill = "RED",font=SmallFont)
+
+        text = "CPU:"
+        draw.text((5, 120), text, fill = "YELLOW",font=SmallFont)
+        text = collector.CPUUsage + "   " + collector.CPUTemp
+        draw.text((40, 120), text, fill = "GREEN",font=SmallFont)
+
+        text = "Mem:"
+        draw.text((5, 140), text, fill = "YELLOW",font=SmallFont)
+        text = collector.MemUsage
+        draw.text((40, 140), text, fill = "GREEN",font=SmallFont)
         
-        text = "Disk: " + collector.DiskUsage
-        draw.text((5, 200), text, fill= "GREEN", font=SmallFont)
+        text = "Disk:"
+        draw.text((5, 160), text, fill= "YELLOW", font=SmallFont)
+        text = collector.DiskUsage
+        draw.text((40, 160), text, fill= "GREEN", font=SmallFont)
 
         text = collector.Uptime
-        draw.text((5, 225), text, fill = "GREEN",font=SmallFont)
+        draw.text((5, 190), text, fill = "GREEN",font=SmallFont)
         
-        # text = collector.CPUFan + "RPM   " + "{:.0f}%".format(100*(CPUFan_PWM / 255))
-        # draw.text((5, 275), text, fill = "GREEN", font=SmallFont)
+        draw.text((30, 255), "Fan", fill = "RED", font=SmallFont)
+        draw.text((105, 255), "CPU", fill = "RED", font=SmallFont)
+        draw.text((175, 255), "Mem", fill = "RED", font=SmallFont)
         
         gaugeWidget.drawGauge(draw, 5, 275, 70, 100*(CPUFan_PWM / 255))
         

@@ -31,6 +31,8 @@ class SystemStatisticsCollector :
     def __init__(self):
         self._IPAddr = ""
         self._WIFI_SSID = ""
+        self._WIFI_RSSI = ""
+        self._WIFI_QUALITY = ""
         self._Hostname = ""
         self._CPUUsage = ""
         self._CPUTemp = ""
@@ -42,6 +44,8 @@ class SystemStatisticsCollector :
         
         self.get_ip()
         self.get_wifi_ssid()
+        self.get_wifi_rssi()
+        self.get_wifi_quality()
         self.get_hostname()
         self.get_cpu_usage()
         self.get_cpu_temp()
@@ -57,6 +61,14 @@ class SystemStatisticsCollector :
     @property
     def WIFI_SSID(self):
         return self._WIFI_SSID
+    
+    @property
+    def WIFI_RSSI(self):
+        return self._WIFI_RSSI
+    
+    @property
+    def WIFI_QUALITY(self):
+        return self._WIFI_QUALITY
     
     @property
     def Hostname(self):
@@ -96,6 +108,16 @@ class SystemStatisticsCollector :
         cmd = "iwconfig 2>/dev/null | grep 'ESSID' | awk -F: '{gsub(/\"/, \"\"); print $2}'"
         self._WIFI_SSID = subprocess.check_output(cmd, shell=True).decode("utf-8")
         threading.Timer(5, self.get_wifi_ssid).start()
+
+    def get_wifi_rssi(self):
+        cmd = "iwconfig 2>/dev/null | grep 'Signal level' | awk -F= '{print $3}'"
+        self._WIFI_RSSI = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+        threading.Timer(5, self.get_wifi_rssi).start()
+
+    def get_wifi_quality(self):
+        cmd = "iwconfig 2>/dev/null | grep 'Signal level' | awk -F'=' '{print $2}' | awk '{print $1}' | awk -F'/' '{print 100*($1/$2) }'"
+        self._WIFI_QUALITY = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+        threading.Timer(5, self.get_wifi_quality).start()
 
     def get_hostname(self):
         cmd = "hostname"
