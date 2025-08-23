@@ -106,7 +106,7 @@ class SystemStatisticsCollector :
         
     def get_wifi_ssid(self):
         cmd = "iwconfig 2>/dev/null | grep 'ESSID' | awk -F: '{gsub(/\"/, \"\"); print $2}'"
-        self._WIFI_SSID = subprocess.check_output(cmd, shell=True).decode("utf-8")
+        self._WIFI_SSID = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
         threading.Timer(5, self.get_wifi_ssid).start()
 
     def get_wifi_rssi(self):

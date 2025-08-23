@@ -15,6 +15,16 @@ from gpiozero import PWMOutputDevice
 import systemStats
 import gaugeWidget
 
+def RedGreenColorScale(value : float, invert : bool = False):
+    if (value > 100): value = 100
+    if (value < 0): value = 0
+
+    highValue = 255 * (value / 100)
+    lowValue = 255 - (255 * (value / 100))
+
+    if (invert): return (int(highValue), int(lowValue), 0)
+    else: return (int(lowValue), int(highValue), 0)
+
 # Raspberry Pi pin configuration:
 RST = 27
 DC = 25
@@ -46,7 +56,7 @@ try:
         
         cmd = 'cat /sys/devices/platform/cooling_fan/hwmon/*/pwm1'
         CPUFan_PWM = float(subprocess.check_output(cmd, shell=True).decode("utf-8"))
-        fanValue = 0.35 + (CPUFan_PWM / 255)
+        fanValue = 0.1 + (CPUFan_PWM / 255)
         if (fanValue > 1.0): fanValue = 1.0
         case_fan.value = fanValue
 
@@ -55,50 +65,81 @@ try:
         image1 = Image.new("RGB", (disp.width, disp.height ), "BLACK")
         draw = ImageDraw.Draw(image1)
 
-        FontBig = ImageFont.truetype("./Font/Font02.ttf",40)
-        Font = ImageFont.truetype("./Font/Font02.ttf",25)
-        SmallFont = ImageFont.truetype("./Font/Font02.ttf",18)
+        FontBigSize = 60
+        FontSize = 25
+        SmallFontSize = 18
+        TextPadding = 1
+        DividerHeight = 5
+        FontBig = ImageFont.truetype("./Font/Font02.ttf",FontBigSize)
+        Font = ImageFont.truetype("./Font/Font02.ttf",FontSize)
+        SmallFont = ImageFont.truetype("./Font/Font02.ttf",SmallFontSize)
+
+        drawpos = 5
+        LPad = 8
+
+        DividerColor = (50, 50, 50)
+
+        draw.rectangle([(0, 0), (240, 360)], outline=DividerColor, width=5)
+
+        text = str(datetime.datetime.now().strftime('%H:%M:%S'))
+        draw.text((LPad, drawpos), text, fill = "WHITE",font=FontBig)
+        drawpos = drawpos + FontBigSize + TextPadding
         
-        text = str(datetime.datetime.now().strftime('%m-%d-%Y %H:%M:%S'))
-        draw.text((5, 5), text, fill = "WHITE",font=Font)
+        text = str(datetime.datetime.now().strftime('%m-%d-%Y'))
+        draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
+        drawpos = drawpos + SmallFontSize + TextPadding
+
+        drawpos = drawpos + DividerHeight
+        draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
 
         text = collector.IPAddr
-        draw.text((5, 35), text, fill = "YELLOW",font=Font)
+        draw.text((LPad, drawpos), text, fill = "YELLOW",font=Font)
+        drawpos = drawpos + FontSize + TextPadding
 
         if collector._WIFI_QUALITY != "":
             text = collector.WIFI_SSID
-            draw.text((5, 70), text, fill = "GREEN",font=Font)
+            draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
 
             text = collector._WIFI_QUALITY + "%  " + collector._WIFI_RSSI
-            draw.text((5, 95), text, fill = "RED",font=SmallFont)
+            draw.text((LPad, drawpos), text, fill = RedGreenColorScale(float(collector._WIFI_QUALITY)),font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
 
+        drawpos = drawpos + DividerHeight
+        draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
+
+        drawpos = drawpos + TextPadding
         text = "CPU:"
-        draw.text((5, 120), text, fill = "YELLOW",font=SmallFont)
+        draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
         text = collector.CPUUsage + "   " + collector.CPUTemp
-        draw.text((40, 120), text, fill = "GREEN",font=SmallFont)
+        draw.text((LPad + 40, drawpos), text, fill = "GREEN",font=SmallFont)
+        drawpos = drawpos + SmallFontSize + TextPadding
 
         text = "Mem:"
-        draw.text((5, 140), text, fill = "YELLOW",font=SmallFont)
+        draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
         text = collector.MemUsage
-        draw.text((40, 140), text, fill = "GREEN",font=SmallFont)
+        draw.text((LPad + 40, drawpos), text, fill = "GREEN",font=SmallFont)
+        drawpos = drawpos + SmallFontSize + TextPadding
         
         text = "Disk:"
-        draw.text((5, 160), text, fill= "YELLOW", font=SmallFont)
+        draw.text((LPad, drawpos), text, fill= "YELLOW", font=SmallFont)
         text = collector.DiskUsage
-        draw.text((40, 160), text, fill= "GREEN", font=SmallFont)
+        draw.text((LPad + 40, drawpos), text, fill= "GREEN", font=SmallFont)
+        drawpos = drawpos + SmallFontSize + TextPadding
 
         text = collector.Uptime
-        draw.text((5, 190), text, fill = "GREEN",font=SmallFont)
+        draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
+        drawpos = drawpos + SmallFontSize + TextPadding
         
         draw.text((30, 255), "Fan", fill = "RED", font=SmallFont)
         draw.text((105, 255), "CPU", fill = "RED", font=SmallFont)
-        draw.text((175, 255), "Mem", fill = "RED", font=SmallFont)
+        draw.text((185, 255), "Mem", fill = "RED", font=SmallFont)
         
-        gaugeWidget.drawGauge(draw, 5, 275, 70, 100*(CPUFan_PWM / 255))
+        gaugeWidget.drawGauge(draw, 8, 275, 70, 100*(CPUFan_PWM / 255))
         
-        gaugeWidget.drawGauge(draw, 80, 275, 70, float(collector.CPUUsage[:-1]))
+        gaugeWidget.drawGauge(draw, 85, 275, 70, float(collector.CPUUsage[:-1]))
         
-        gaugeWidget.drawGauge(draw, 155, 275, 70, float(collector.MemUsage[-7:-1]))
+        gaugeWidget.drawGauge(draw, 162, 275, 70, float(collector.MemUsage[-7:-1]))
 
         image1=image1.rotate(0)
         disp.ShowImage(image1)
