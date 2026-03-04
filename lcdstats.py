@@ -14,6 +14,7 @@ from PIL import Image,ImageDraw,ImageFont
 from gpiozero import PWMOutputDevice
 import systemStats
 import gaugeWidget
+import display_server
 
 def RedGreenColorScale(value : float, invert : bool = False):
     if (value > 100): value = 100
@@ -44,6 +45,13 @@ try:
     disp.clear()
     #Set the backlight to 100
     disp.bl_DutyCycle(100)
+    last_ipc_server_brightness = -1.0
+
+    # Start IPC server for GTK applet communication
+    ipc_server = display_server.DisplayControlServer(
+        socket_path="/tmp/lcdstats.sock",
+    )
+    ipc_server.start()
     
     case_fan = PWMOutputDevice(CASE_FAN)
     case_fan.value = 0.0
@@ -60,6 +68,11 @@ try:
         if (fanValue > 1.0): fanValue = 1.0
         case_fan.value = fanValue
 
+
+        # Sync LCD backlight with main display brightness
+        if ipc_server.has_brightness and ipc_server.brightness != last_ipc_server_brightness:
+            disp.bl_DutyCycle(ipc_server.brightness)
+        last_ipc_server_brightness = ipc_server.brightness
 
         # Create blank image for drawing.
         image1 = Image.new("RGB", (disp.width, disp.height ), "BLACK")
@@ -131,15 +144,47 @@ try:
         draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
         drawpos = drawpos + SmallFontSize + TextPadding
         
-        draw.text((30, 255), "Fan", fill = "RED", font=SmallFont)
+        draw.text((30, 255), "Vol", fill = "RED", font=SmallFont)
         draw.text((105, 255), "CPU", fill = "RED", font=SmallFont)
         draw.text((185, 255), "Mem", fill = "RED", font=SmallFont)
         
-        gaugeWidget.drawGauge(draw, 8, 275, 70, 100*(CPUFan_PWM / 255))
+        vol_value = ipc_server.volume if ipc_server.has_volume else 0.0
+        gaugeWidget.drawGauge(draw, 8, 275, 70, vol_value)
         
         gaugeWidget.drawGauge(draw, 85, 275, 70, float(collector.CPUUsage[:-1]))
         
         gaugeWidget.drawGauge(draw, 162, 275, 70, float(collector.MemUsage[-7:-1]))
+
+        # Brightness / Volume bar section (only when connected)
+        bar_y = 350
+        bar_h = 10
+        bar_left = LPad
+        bar_max_w = 240 - LPad * 2
+
+        if ipc_server.has_brightness:
+            bri = ipc_server.brightness
+            label = f"BRI {bri:.0f}%"
+            draw.text((bar_left, bar_y - SmallFontSize - 1), label, fill="WHITE", font=SmallFont)
+            # background
+            draw.rectangle([(bar_left, bar_y), (bar_left + bar_max_w, bar_y + bar_h)],
+                           outline="YELLOW", fill="BLACK")
+            # filled portion
+            fill_w = int(bar_max_w * bri / 100)
+            if fill_w > 0:
+                draw.rectangle([(bar_left, bar_y), (bar_left + fill_w, bar_y + bar_h)],
+                               fill="YELLOW")
+            bar_y += bar_h + SmallFontSize + 4
+
+        if ipc_server.has_volume:
+            vol = ipc_server.volume
+            label = f"VOL {vol:.0f}%"
+            draw.text((bar_left, bar_y - SmallFontSize - 1), label, fill="WHITE", font=SmallFont)
+            draw.rectangle([(bar_left, bar_y), (bar_left + bar_max_w, bar_y + bar_h)],
+                           outline="CYAN", fill="BLACK")
+            fill_w = int(bar_max_w * vol / 100)
+            if fill_w > 0:
+                draw.rectangle([(bar_left, bar_y), (bar_left + fill_w, bar_y + bar_h)],
+                               fill="CYAN")
 
         image1=image1.rotate(0)
         disp.ShowImage(image1)
@@ -149,6 +194,7 @@ try:
 except IOError as e:
     logging.info(e)    
 except KeyboardInterrupt:
+    ipc_server.stop()
     disp.module_exit()
     logging.info("quit:")
     exit()
