@@ -7,13 +7,14 @@ import time
 import datetime
 import subprocess
 import logging
+import math
 import spidev as SPI
 sys.path.append(".")
 from lib import LCD_2inch4
 from PIL import Image,ImageDraw,ImageFont
 from gpiozero import PWMOutputDevice
 import systemStats
-import gaugeWidget
+import batteryStats
 import display_server
 
 def RedGreenColorScale(value : float, invert : bool = False):
@@ -26,6 +27,15 @@ def RedGreenColorScale(value : float, invert : bool = False):
     if (invert): return (int(highValue), int(lowValue), 0)
     else: return (int(lowValue), int(highValue), 0)
 
+
+def SignedValueColor(value: float):
+    # Positive and negative values are highlighted to show charge direction.
+    if value > 0.01:
+        return "GREEN"
+    if value < -0.01:
+        return "RED"
+    return "YELLOW"
+
 # Raspberry Pi pin configuration:
 RST = 27
 DC = 25
@@ -33,6 +43,11 @@ BL = 18
 bus = 0 
 device = 0 
 CASE_FAN = 13
+DISPLAY_POLL_INTERVAL_SECONDS = 0.5
+FAN_RAMP_UP_SECONDS = 0.7
+FAN_RAMP_DOWN_SECONDS = 2.5
+BATTERY_CHARGE_FAN_BOOST_A = 0.5  # Enable fan floor above 500 mA charging current.
+BATTERY_CHARGE_FAN_MIN_DUTY = 0.5  # While boost is active, run at least 50% unless CPU fan target is higher.
 logging.basicConfig(level=logging.DEBUG)
 try:
     # display with hardware SPI:
@@ -59,14 +74,55 @@ try:
     i = 0
     
     collector = systemStats.SystemStatisticsCollector()
+    battery_collector = None
+    next_battery_init_attempt = 0.0
+    mirrored_fan_value = 0.0
+    last_fan_update = time.monotonic()
 
     while True:
-        
+        now = time.monotonic()
+        battery_sample = None
+
+        if battery_collector is None and now >= next_battery_init_attempt:
+            try:
+                battery_collector = batteryStats.BatteryStatisticsCollector(addr=0x41)
+            except Exception as e:
+                logging.debug("INA219 init failed: %s", e)
+                next_battery_init_attempt = now + 5.0
+
+        if battery_collector is not None:
+            try:
+                battery_sample = battery_collector.read()
+            except Exception as e:
+                logging.debug("INA219 read failed: %s", e)
+                battery_collector = None
+                next_battery_init_attempt = now + 5.0
+
+        battery_current_for_fan = battery_sample["current"] if battery_sample is not None else 0.0
+
         cmd = 'cat /sys/devices/platform/cooling_fan/hwmon/*/pwm1'
         CPUFan_PWM = float(subprocess.check_output(cmd, shell=True).decode("utf-8"))
-        fanValue = 0.1 + (CPUFan_PWM / 255)
-        if (fanValue > 1.0): fanValue = 1.0
-        case_fan.value = fanValue
+        cpu_fan_target = CPUFan_PWM / 255.0
+        if cpu_fan_target < 0.0:
+            cpu_fan_target = 0.0
+        if cpu_fan_target > 1.0:
+            cpu_fan_target = 1.0
+
+        fan_target = cpu_fan_target
+        if battery_current_for_fan > BATTERY_CHARGE_FAN_BOOST_A:
+            fan_target = max(cpu_fan_target, BATTERY_CHARGE_FAN_MIN_DUTY)
+
+        dt = max(0.0, now - last_fan_update)
+        ramp_seconds = FAN_RAMP_UP_SECONDS if fan_target > mirrored_fan_value else FAN_RAMP_DOWN_SECONDS
+        alpha = 1.0 if ramp_seconds <= 0 else 1.0 - math.exp(-dt / ramp_seconds)
+        mirrored_fan_value += (fan_target - mirrored_fan_value) * alpha
+
+        # Allow full stop when the source fan is off and no boost is active.
+        if fan_target <= 0.0 and mirrored_fan_value < 0.01:
+            mirrored_fan_value = 0.0
+
+        case_fan.value = max(0.0, min(1.0, mirrored_fan_value))
+        last_fan_update = now
 
 
         # Sync LCD backlight with main display brightness
@@ -92,7 +148,7 @@ try:
 
         DividerColor = (50, 50, 50)
 
-        draw.rectangle([(0, 0), (240, 360)], outline=DividerColor, width=5)
+        draw.rectangle([(0, 0), (disp.width, disp.height)], outline=DividerColor, width=5)
 
         text = str(datetime.datetime.now().strftime('%H:%M:%S'))
         draw.text((LPad, drawpos), text, fill = "WHITE",font=FontBig)
@@ -143,53 +199,58 @@ try:
         text = collector.Uptime
         draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
         drawpos = drawpos + SmallFontSize + TextPadding
-        
-        draw.text((30, 255), "Vol", fill = "RED", font=SmallFont)
-        draw.text((105, 255), "CPU", fill = "RED", font=SmallFont)
-        draw.text((185, 255), "Mem", fill = "RED", font=SmallFont)
-        
-        vol_value = ipc_server.volume if ipc_server.has_volume else 0.0
-        gaugeWidget.drawGauge(draw, 8, 275, 70, vol_value)
-        
-        gaugeWidget.drawGauge(draw, 85, 275, 70, float(collector.CPUUsage[:-1]))
-        
-        gaugeWidget.drawGauge(draw, 162, 275, 70, float(collector.MemUsage[-7:-1]))
 
-        # Brightness / Volume bar section (only when connected)
-        bar_y = 350
-        bar_h = 10
+        drawpos = drawpos + DividerHeight
+        draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
+
+        drawpos = drawpos + TextPadding
+        draw.text((LPad, drawpos), "Battery", fill="YELLOW", font=SmallFont)
+        drawpos = drawpos + SmallFontSize + TextPadding
+
+        if battery_sample is None:
+            draw.text((LPad, drawpos), "INA219 not detected", fill="RED", font=SmallFont)
+            battery_voltage = 0.0
+            battery_current = 0.0
+            battery_power = 0.0
+            battery_pct = 0.0
+            drawpos = drawpos + SmallFontSize + TextPadding
+        else:
+            battery_voltage = battery_sample["voltage"]
+            battery_current = battery_sample["current"]
+            battery_power = battery_sample["power"]
+            battery_pct = battery_sample["percentage"]
+            current_color = SignedValueColor(battery_current)
+
+            draw.text((LPad, drawpos), f"V: {battery_voltage:5.2f}V", fill="CYAN", font=SmallFont)
+            draw.text((LPad + 116, drawpos), f"I: {battery_current:5.2f}A", fill=current_color, font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
+
+            draw.text((LPad, drawpos), f"P: {battery_power:5.2f}W", fill="CYAN", font=SmallFont)
+            draw.text((LPad + 116, drawpos), f"SOC: {battery_pct:5.1f}%", fill=RedGreenColorScale(battery_pct), font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
+
         bar_left = LPad
-        bar_max_w = 240 - LPad * 2
+        bar_top = disp.height - 10
+        bar_height = 6
+        bar_width = disp.width - (LPad * 2)
+        bar_fill_w = int(bar_width * max(0.0, min(100.0, battery_pct)) / 100.0)
 
-        if ipc_server.has_brightness:
-            bri = ipc_server.brightness
-            label = f"BRI {bri:.0f}%"
-            draw.text((bar_left, bar_y - SmallFontSize - 1), label, fill="WHITE", font=SmallFont)
-            # background
-            draw.rectangle([(bar_left, bar_y), (bar_left + bar_max_w, bar_y + bar_h)],
-                           outline="YELLOW", fill="BLACK")
-            # filled portion
-            fill_w = int(bar_max_w * bri / 100)
-            if fill_w > 0:
-                draw.rectangle([(bar_left, bar_y), (bar_left + fill_w, bar_y + bar_h)],
-                               fill="YELLOW")
-            bar_y += bar_h + SmallFontSize + 4
-
-        if ipc_server.has_volume:
-            vol = ipc_server.volume
-            label = f"VOL {vol:.0f}%"
-            draw.text((bar_left, bar_y - SmallFontSize - 1), label, fill="WHITE", font=SmallFont)
-            draw.rectangle([(bar_left, bar_y), (bar_left + bar_max_w, bar_y + bar_h)],
-                           outline="CYAN", fill="BLACK")
-            fill_w = int(bar_max_w * vol / 100)
-            if fill_w > 0:
-                draw.rectangle([(bar_left, bar_y), (bar_left + fill_w, bar_y + bar_h)],
-                               fill="CYAN")
+        draw.rectangle(
+            [(bar_left, bar_top), (bar_left + bar_width, bar_top + bar_height)],
+            fill=(22, 22, 22),
+            outline=(140, 140, 140),
+            width=2,
+        )
+        if bar_fill_w > 0:
+            draw.rectangle(
+                [(bar_left + 1, bar_top + 1), (bar_left + bar_fill_w - 1, bar_top + bar_height - 1)],
+                fill=RedGreenColorScale(battery_pct),
+            )
 
         image1=image1.rotate(0)
         disp.ShowImage(image1)
         
-        time.sleep(0.2)
+        time.sleep(DISPLAY_POLL_INTERVAL_SECONDS)
 
 except IOError as e:
     logging.info(e)    
