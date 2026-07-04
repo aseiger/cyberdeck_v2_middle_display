@@ -15,6 +15,7 @@ from PIL import Image,ImageDraw,ImageFont
 from gpiozero import PWMOutputDevice
 import systemStats
 import batteryStats
+import gpsStats
 import display_server
 
 def RedGreenColorScale(value : float, invert : bool = False):
@@ -74,6 +75,7 @@ try:
     i = 0
     
     collector = systemStats.SystemStatisticsCollector()
+    gps_collector = gpsStats.GPSStatisticsCollector()
     battery_collector = None
     next_battery_init_attempt = 0.0
     mirrored_fan_value = 0.0
@@ -137,11 +139,13 @@ try:
         FontBigSize = 60
         FontSize = 25
         SmallFontSize = 18
+        TinyFontSize = 14
         TextPadding = 1
         DividerHeight = 5
         FontBig = ImageFont.truetype("./Font/Font02.ttf",FontBigSize)
         Font = ImageFont.truetype("./Font/Font02.ttf",FontSize)
         SmallFont = ImageFont.truetype("./Font/Font02.ttf",SmallFontSize)
+        TinyFont = ImageFont.truetype("./Font/Font02.ttf",TinyFontSize)
 
         drawpos = 5
         LPad = 8
@@ -150,8 +154,36 @@ try:
 
         draw.rectangle([(0, 0), (disp.width, disp.height)], outline=DividerColor, width=5)
 
-        text = str(datetime.datetime.now().strftime('%H:%M:%S'))
+        text = str(datetime.datetime.now().strftime('%H:%M'))
         draw.text((LPad, drawpos), text, fill = "WHITE",font=FontBig)
+
+        # GPS status indicator occupies the space freed by dropping seconds.
+        if gps_collector.Connected:
+            gps_fix_text = gps_collector.FixText
+            gps_has_fix = gps_collector.FixMode >= 2
+            gps_color = "GREEN" if gps_has_fix else "YELLOW"
+            gps_sats_text = f"{gps_collector.SatsUsed}/{gps_collector.SatsVisible} sat"
+            if gps_collector.PPSActive:
+                gps_pps_text = "PPS lock"
+                gps_pps_color = "GREEN"
+            else:
+                gps_pps_text = "No PPS"
+                gps_pps_color = (120, 120, 120)
+        else:
+            gps_fix_text = "No GPS"
+            gps_color = "RED"
+            gps_sats_text = "--/-- sat"
+            gps_pps_text = "No PPS"
+            gps_pps_color = (120, 120, 120)
+
+        gps_x = LPad + 155
+        gps_y = drawpos + 2
+        gps_line = TinyFontSize + 1
+        draw.text((gps_x, gps_y), "GPS", fill="CYAN", font=TinyFont)
+        draw.text((gps_x, gps_y + gps_line), gps_fix_text, fill=gps_color, font=TinyFont)
+        draw.text((gps_x, gps_y + gps_line * 2), gps_sats_text, fill=gps_color, font=TinyFont)
+        draw.text((gps_x, gps_y + gps_line * 3), gps_pps_text, fill=gps_pps_color, font=TinyFont)
+
         drawpos = drawpos + FontBigSize + TextPadding
         
         text = str(datetime.datetime.now().strftime('%m-%d-%Y'))
@@ -256,6 +288,7 @@ except IOError as e:
     logging.info(e)    
 except KeyboardInterrupt:
     ipc_server.stop()
+    gps_collector.stop()
     disp.module_exit()
     logging.info("quit:")
     exit()

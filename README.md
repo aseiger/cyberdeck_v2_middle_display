@@ -4,7 +4,8 @@ A Raspberry Pi system-stats dashboard for a Waveshare 2.4" SPI LCD (240×320), d
 
 ## Features
 
-- **Real-time clock** — large HH:MM:SS display with date
+- **Real-time clock** — large HH:MM display with date
+- **GPS status** — fix status (No Fix / 2D / 3D), satellite count, and 1PPS timing lock read from `gpsd`
 - **Network info** — IP address, Wi-Fi SSID, signal quality & RSSI
 - **System stats** — CPU usage & temperature, memory usage, disk usage, uptime
 - **Analog gauges** — half-circle needle gauges for volume, CPU, and memory
@@ -32,6 +33,7 @@ A Raspberry Pi system-stats dashboard for a Waveshare 2.4" SPI LCD (240×320), d
 - Python 3 with a virtual environment
 - SPI enabled (`sudo raspi-config` → Interface Options → SPI)
 - System packages: `sysstat` (for `mpstat`)
+- `gpsd` running for GPS status (optional; the indicator shows "No GPS" if unavailable)
 
 ## Installation
 
@@ -96,6 +98,7 @@ External clients can connect to the Unix domain socket at `/tmp/lcdstats.sock` u
 | `lcdstats.py` | Main application — renders the stats dashboard to the LCD |
 | `display_server.py` | Unix domain socket IPC server for brightness/volume control |
 | `systemStats.py` | Threaded system statistics collector (CPU, memory, disk, network, etc.) |
+| `gpsStats.py` | Threaded GPS status collector (fix status & satellite count via `gpsd`) |
 | `gaugeWidget.py` | Half-circle analog gauge drawing widget |
 | `lcdstats.service` | systemd unit file for running at boot |
 | `lib/` | Waveshare LCD driver library (SPI, GPIO, hardware PWM) |
