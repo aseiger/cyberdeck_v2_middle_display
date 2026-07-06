@@ -8,6 +8,8 @@ import datetime
 import subprocess
 import logging
 import math
+import signal
+import atexit
 import spidev as SPI
 sys.path.append(".")
 from lib import LCD_2inch4
@@ -42,7 +44,7 @@ def SignedValueColor(value: float):
 class PIDController:
     """A simple PID controller for fan speed control."""
     
-    def __init__(self, kp=2.0, ki=0.5, kd=0.1, output_min=0.0, output_max=1.0):
+    def __init__(self, kp=1.0, ki=0.8, kd=0.1, output_min=0.0, output_max=1.0):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -129,6 +131,67 @@ DISPLAY_POLL_INTERVAL_SECONDS = 0.5
 BATTERY_CHARGE_FAN_BOOST_A = 0.5  # Enable fan floor above 500 mA charging current.
 BATTERY_CHARGE_FAN_MIN_RPM = 0.5 * AUX_FAN_MAX_RPM  # RPM floor while charge boost is active.
 logging.basicConfig(level=logging.DEBUG)
+
+case_fan = None
+fan_tach = None
+ipc_server = None
+gps_collector = None
+disp = None
+
+
+def cleanup_and_exit(signum=None, frame=None):
+    """Force peripherals to a safe state during service stop/shutdown."""
+    global case_fan, fan_tach, ipc_server, gps_collector, disp
+
+    if case_fan is not None:
+        try:
+            case_fan.value = 0.0
+            case_fan.close()
+        except Exception:
+            pass
+        finally:
+            case_fan = None
+
+    if fan_tach is not None:
+        try:
+            fan_tach._input.close()
+        except Exception:
+            pass
+        finally:
+            fan_tach = None
+
+    if ipc_server is not None:
+        try:
+            ipc_server.stop()
+        except Exception:
+            pass
+        finally:
+            ipc_server = None
+
+    if gps_collector is not None:
+        try:
+            gps_collector.stop()
+        except Exception:
+            pass
+        finally:
+            gps_collector = None
+
+    if disp is not None:
+        try:
+            disp.module_exit()
+        except Exception:
+            pass
+        finally:
+            disp = None
+
+    if signum is not None:
+        raise SystemExit(0)
+
+
+atexit.register(cleanup_and_exit)
+signal.signal(signal.SIGTERM, cleanup_and_exit)
+signal.signal(signal.SIGINT, cleanup_and_exit)
+
 try:
     # display with hardware SPI:
     ''' Warning!!!Don't  creation of multiple displayer objects!!! '''
@@ -148,7 +211,7 @@ try:
     )
     ipc_server.start()
     
-    case_fan = PWMOutputDevice(CASE_FAN)
+    case_fan = PWMOutputDevice(CASE_FAN, initial_value=0.0)
     case_fan.value = 0.0
 
     i = 0
@@ -410,8 +473,6 @@ try:
 except IOError as e:
     logging.info(e)    
 except KeyboardInterrupt:
-    ipc_server.stop()
-    gps_collector.stop()
-    disp.module_exit()
     logging.info("quit:")
-    exit()
+finally:
+    cleanup_and_exit()

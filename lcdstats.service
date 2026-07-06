@@ -2,8 +2,13 @@
 Description=LCD Statistics Viewer
 
 [Service]
+Type=simple
+ExecStartPre=/usr/bin/pinctrl set 13 op dl
 ExecStart=/home/alex/DisplayControl/.venv/bin/python /home/alex/DisplayControl/lcdstats.py
+ExecStopPost=/usr/bin/pinctrl set 13 op dl
 WorkingDirectory=/home/alex/DisplayControl
+KillSignal=SIGINT
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target
