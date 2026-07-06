@@ -38,6 +38,13 @@ class GPSStatisticsCollector:
         self._sats_visible = 0
         self._pps_last_seen = 0.0
         self._last_update = 0.0
+        # Additional TPV fields
+        self._altitude = 0.0
+        self._lat = 0.0
+        self._lon = 0.0
+        self._speed_mps = 0.0   # meters per second
+        self._hdop = 0.0
+        self._nmea_last_seen = 0.0
 
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -81,6 +88,52 @@ class GPSStatisticsCollector:
                 return False
             return (time.monotonic() - self._pps_last_seen) < self._pps_timeout_seconds
 
+    @property
+    def Altitude(self):
+        """Altitude in meters (MSL)."""
+        with self._lock:
+            return self._altitude
+
+    @property
+    def Latitude(self):
+        with self._lock:
+            return self._lat
+
+    @property
+    def Longitude(self):
+        with self._lock:
+            return self._lon
+
+    @property
+    def SpeedMPS(self):
+        """Ground speed in meters per second."""
+        with self._lock:
+            return self._speed_mps
+
+    @property
+    def SpeedKPH(self):
+        """Ground speed in kilometers per hour."""
+        with self._lock:
+            return self._speed_mps * 3.6
+
+    @property
+    def HDOP(self):
+        """Horizontal dilution of precision (lower is better)."""
+        with self._lock:
+            return self._hdop
+
+    @property
+    def NMEAActive(self):
+        """True when NMEA sentences are arriving regularly.
+
+        We track this by watching for any TPV report from gpsd — a live
+        fix stream means the receiver is outputting valid NMEA data.
+        """
+        with self._lock:
+            if not self._connected or self._nmea_last_seen == 0.0:
+                return False
+            return (time.monotonic() - self._nmea_last_seen) < self._pps_timeout_seconds
+
     def stop(self):
         self._stop.set()
 
@@ -91,6 +144,12 @@ class GPSStatisticsCollector:
             self._sats_used = 0
             self._sats_visible = 0
             self._pps_last_seen = 0.0
+            self._altitude = 0.0
+            self._lat = 0.0
+            self._lon = 0.0
+            self._speed_mps = 0.0
+            self._hdop = 0.0
+            self._nmea_last_seen = 0.0
 
     def _run(self):
         while not self._stop.is_set():
@@ -149,7 +208,13 @@ class GPSStatisticsCollector:
                 mode = 0
             with self._lock:
                 self._fix_mode = mode
+                self._altitude = float(report.get("alt", 0.0) or 0.0)
+                self._lat = float(report.get("lat", 0.0) or 0.0)
+                self._lon = float(report.get("lon", 0.0) or 0.0)
+                self._speed_mps = float(report.get("speed", 0.0) or 0.0)
+                self._hdop = float(report.get("hdop", 0.0) or 0.0)
                 self._last_update = time.monotonic()
+                self._nmea_last_seen = time.monotonic()
 
         elif report_class == "SKY":
             satellites = report.get("satellites")

@@ -12,7 +12,8 @@ import spidev as SPI
 sys.path.append(".")
 from lib import LCD_2inch4
 from PIL import Image,ImageDraw,ImageFont
-from gpiozero import PWMOutputDevice
+from gpiozero import PWMOutputDevice, Button
+import glob
 import systemStats
 import batteryStats
 import gpsStats
@@ -37,6 +38,81 @@ def SignedValueColor(value: float):
         return "RED"
     return "YELLOW"
 
+
+class PIDController:
+    """A simple PID controller for fan speed control."""
+    
+    def __init__(self, kp=2.0, ki=0.5, kd=0.1, output_min=0.0, output_max=1.0):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.output_min = output_min
+        self.output_max = output_max
+        
+        self.previous_error = 0.0
+        self.integral = 0.0
+        self.previous_time = time.monotonic()
+        
+    def compute(self, setpoint, measured_value):
+        """Compute the PID output given a setpoint and measured value."""
+        current_time = time.monotonic()
+        dt = current_time - self.previous_time
+        
+        if dt <= 0:
+            return 0.0
+            
+        error = setpoint - measured_value
+        self.integral += error * dt
+        # Anti-windup: keep the integral term within the output range.
+        if self.ki > 0:
+            self.integral = max(self.output_min / self.ki,
+                                min(self.output_max / self.ki, self.integral))
+        derivative = (error - self.previous_error) / dt
+        
+        # PID output
+        output = (self.kp * error + 
+                 self.ki * self.integral + 
+                 self.kd * derivative)
+        
+        # Clamp output to valid range
+        output = max(self.output_min, min(self.output_max, output))
+        
+        self.previous_error = error
+        self.previous_time = current_time
+        
+        return output
+
+    def reset(self):
+        """Clear accumulated state (use when the loop is disabled)."""
+        self.previous_error = 0.0
+        self.integral = 0.0
+        self.previous_time = time.monotonic()
+
+
+class FanTachometer:
+    """Counts tach pulses on a GPIO pin and reports RPM per polling window."""
+
+    def __init__(self, pin, pulses_per_rev=2):
+        self._pulses_per_rev = pulses_per_rev
+        self._count = 0
+        self._last_time = time.monotonic()
+        self._input = Button(pin, pull_up=True)
+        self._input.when_pressed = self._on_pulse
+
+    def _on_pulse(self):
+        self._count += 1
+
+    def read_rpm(self):
+        now = time.monotonic()
+        dt = now - self._last_time
+        pulses = self._count
+        self._count = 0
+        self._last_time = now
+        if dt <= 0:
+            return 0.0
+        return pulses / self._pulses_per_rev / dt * 60.0
+
+
 # Raspberry Pi pin configuration:
 RST = 27
 DC = 25
@@ -44,11 +120,14 @@ BL = 18
 bus = 0 
 device = 0 
 CASE_FAN = 13
+FAN_TACH = 17                      # BCM pin wired to the aux fan tach output (found via detect_tach.py)
+AUX_FAN_PULSES_PER_REV = 2
+AUX_FAN_MAX_RPM = 4600.0           # measured at 100% duty via detect_tach.py
+AUX_FAN_STOP_RPM = 300.0           # below this target RPM, just stop the fan
+CPU_FAN_RPM_GLOB = "/sys/devices/platform/cooling_fan/hwmon/*/fan1_input"
 DISPLAY_POLL_INTERVAL_SECONDS = 0.5
-FAN_RAMP_UP_SECONDS = 0.7
-FAN_RAMP_DOWN_SECONDS = 2.5
 BATTERY_CHARGE_FAN_BOOST_A = 0.5  # Enable fan floor above 500 mA charging current.
-BATTERY_CHARGE_FAN_MIN_DUTY = 0.5  # While boost is active, run at least 50% unless CPU fan target is higher.
+BATTERY_CHARGE_FAN_MIN_RPM = 0.5 * AUX_FAN_MAX_RPM  # RPM floor while charge boost is active.
 logging.basicConfig(level=logging.DEBUG)
 try:
     # display with hardware SPI:
@@ -78,8 +157,14 @@ try:
     gps_collector = gpsStats.GPSStatisticsCollector()
     battery_collector = None
     next_battery_init_attempt = 0.0
-    mirrored_fan_value = 0.0
-    last_fan_update = time.monotonic()
+    fan_tach = FanTachometer(FAN_TACH, pulses_per_rev=AUX_FAN_PULSES_PER_REV)
+    # PID trims around the feedforward duty; error and output are normalized
+    # to the fan's full range, so gains are dimensionless. Gains are kept low
+    # because the 0.5s tach window is noisy (~40 pulses/sample) and the
+    # feedforward term already does most of the work.
+    fan_pid = PIDController(kp=0.1, ki=0.08, kd=0.0, output_min=-0.25, output_max=0.25)
+    aux_fan_rpm_smooth = 0.0
+    AUX_FAN_RPM_SMOOTHING = 0.3  # EMA weight per 0.5s sample (~1.4s time constant)
 
     while True:
         now = time.monotonic()
@@ -102,29 +187,37 @@ try:
 
         battery_current_for_fan = battery_sample["current"] if battery_sample is not None else 0.0
 
-        cmd = 'cat /sys/devices/platform/cooling_fan/hwmon/*/pwm1'
-        CPUFan_PWM = float(subprocess.check_output(cmd, shell=True).decode("utf-8"))
-        cpu_fan_target = CPUFan_PWM / 255.0
-        if cpu_fan_target < 0.0:
-            cpu_fan_target = 0.0
-        if cpu_fan_target > 1.0:
-            cpu_fan_target = 1.0
+        # Setpoint: match the Pi's built-in fan RPM (fan1_input reports RPM directly).
+        cpu_fan_rpm = 0.0
+        for rpm_path in glob.glob(CPU_FAN_RPM_GLOB):
+            try:
+                with open(rpm_path) as f:
+                    cpu_fan_rpm = float(f.read())
+                break
+            except (OSError, ValueError):
+                pass
 
-        fan_target = cpu_fan_target
+        target_rpm = cpu_fan_rpm
         if battery_current_for_fan > BATTERY_CHARGE_FAN_BOOST_A:
-            fan_target = max(cpu_fan_target, BATTERY_CHARGE_FAN_MIN_DUTY)
+            target_rpm = max(target_rpm, BATTERY_CHARGE_FAN_MIN_RPM)
+        target_rpm = min(target_rpm, AUX_FAN_MAX_RPM)
 
-        dt = max(0.0, now - last_fan_update)
-        ramp_seconds = FAN_RAMP_UP_SECONDS if fan_target > mirrored_fan_value else FAN_RAMP_DOWN_SECONDS
-        alpha = 1.0 if ramp_seconds <= 0 else 1.0 - math.exp(-dt / ramp_seconds)
-        mirrored_fan_value += (fan_target - mirrored_fan_value) * alpha
+        aux_fan_rpm = fan_tach.read_rpm()
+        # Smooth the noisy per-window tach reading before it reaches the PID.
+        aux_fan_rpm_smooth += (aux_fan_rpm - aux_fan_rpm_smooth) * AUX_FAN_RPM_SMOOTHING
 
-        # Allow full stop when the source fan is off and no boost is active.
-        if fan_target <= 0.0 and mirrored_fan_value < 0.01:
-            mirrored_fan_value = 0.0
-
-        case_fan.value = max(0.0, min(1.0, mirrored_fan_value))
-        last_fan_update = now
+        if target_rpm < AUX_FAN_STOP_RPM:
+            # Below the aux fan's usable range: stop it and reset the loop.
+            fan_pid.reset()
+            aux_fan_rpm_smooth = 0.0
+            case_fan.value = 0.0
+        else:
+            # Feedforward gets close to the right duty; PID trims out the
+            # remaining RPM error (both normalized to the fan's full range).
+            feedforward = target_rpm / AUX_FAN_MAX_RPM
+            trim = fan_pid.compute(target_rpm / AUX_FAN_MAX_RPM,
+                                   aux_fan_rpm_smooth / AUX_FAN_MAX_RPM)
+            case_fan.value = max(0.0, min(1.0, feedforward + trim))
 
 
         # Sync LCD backlight with main display brightness
@@ -136,16 +229,18 @@ try:
         image1 = Image.new("RGB", (disp.width, disp.height ), "BLACK")
         draw = ImageDraw.Draw(image1)
 
-        FontBigSize = 60
+        FontBigSize = 46
         FontSize = 25
         SmallFontSize = 18
         TinyFontSize = 14
+        GPSFontSize = 15
         TextPadding = 1
         DividerHeight = 5
         FontBig = ImageFont.truetype("./Font/Font02.ttf",FontBigSize)
         Font = ImageFont.truetype("./Font/Font02.ttf",FontSize)
         SmallFont = ImageFont.truetype("./Font/Font02.ttf",SmallFontSize)
         TinyFont = ImageFont.truetype("./Font/Font02.ttf",TinyFontSize)
+        GPSFont = ImageFont.truetype("./Font/Font02.ttf",GPSFontSize)
 
         drawpos = 5
         LPad = 8
@@ -158,31 +253,46 @@ try:
         draw.text((LPad, drawpos), text, fill = "WHITE",font=FontBig)
 
         # GPS status indicator occupies the space freed by dropping seconds.
+        gps_x = LPad + 155
+        gps_y = drawpos
+        gps_line = GPSFontSize + 2
+
         if gps_collector.Connected:
             gps_fix_text = gps_collector.FixText
             gps_has_fix = gps_collector.FixMode >= 2
             gps_color = "GREEN" if gps_has_fix else "YELLOW"
-            gps_sats_text = f"{gps_collector.SatsUsed}/{gps_collector.SatsVisible} sat"
+            gps_signal_text = f"{gps_collector.SatsUsed}/{gps_collector.SatsVisible}"
             if gps_collector.PPSActive:
-                gps_pps_text = "PPS lock"
+                gps_pps_text = "OK"
                 gps_pps_color = "GREEN"
             else:
-                gps_pps_text = "No PPS"
+                gps_pps_text = "--"
                 gps_pps_color = (120, 120, 120)
         else:
             gps_fix_text = "No GPS"
             gps_color = "RED"
-            gps_sats_text = "--/-- sat"
-            gps_pps_text = "No PPS"
+            gps_signal_text = "--/--"
+            gps_pps_text = "--"
             gps_pps_color = (120, 120, 120)
 
-        gps_x = LPad + 155
-        gps_y = drawpos + 2
-        gps_line = TinyFontSize + 1
-        draw.text((gps_x, gps_y), "GPS", fill="CYAN", font=TinyFont)
-        draw.text((gps_x, gps_y + gps_line), gps_fix_text, fill=gps_color, font=TinyFont)
-        draw.text((gps_x, gps_y + gps_line * 2), gps_sats_text, fill=gps_color, font=TinyFont)
-        draw.text((gps_x, gps_y + gps_line * 3), gps_pps_text, fill=gps_pps_color, font=TinyFont)
+        draw.text((gps_x, gps_y), "GPS", fill="CYAN", font=GPSFont)
+
+        # NMEA activity blinker: small circle to the right of "GPS"
+        nmea_blink_x = gps_x + 32
+        nmea_blink_y = gps_y + 7
+        if gps_collector.Connected and gps_collector.NMEAActive:
+            # Blink on/off every second when NMEA sentences are arriving
+            nmea_color = "GREEN" if (time.monotonic() % 2) < 1 else "BLACK"
+        elif gps_collector.Connected:
+            # Solid green when connected but no NMEA data yet
+            nmea_color = "GREEN"
+        else:
+            nmea_color = "RED"
+        draw.ellipse([nmea_blink_x, nmea_blink_y, nmea_blink_x + 6, nmea_blink_y + 6], fill=nmea_color)
+        draw.text((gps_x, gps_y + gps_line), f"Fix {gps_fix_text}", fill=gps_color, font=GPSFont)
+        draw.text((gps_x, gps_y + gps_line * 2), f"Sig {gps_signal_text}", fill=gps_color, font=GPSFont)
+        draw.text((gps_x, gps_y + gps_line * 3), f"PPS {gps_pps_text}", fill=gps_pps_color, font=GPSFont)
+
 
         drawpos = drawpos + FontBigSize + TextPadding
         
@@ -226,6 +336,19 @@ try:
         draw.text((LPad, drawpos), text, fill= "YELLOW", font=SmallFont)
         text = collector.DiskUsage
         draw.text((LPad + 40, drawpos), text, fill= "GREEN", font=SmallFont)
+        drawpos = drawpos + SmallFontSize + TextPadding
+
+        text = "Fan:"
+        draw.text((LPad, drawpos), text, fill="YELLOW", font=SmallFont)
+        if target_rpm < AUX_FAN_STOP_RPM:
+            fan_text = "off"
+            fan_color = (120, 120, 120)
+        else:
+            fan_text = f"{aux_fan_rpm_smooth:4.0f} / {target_rpm:4.0f} rpm"
+            # Green when tracking within 10% of target, yellow otherwise.
+            rpm_error = abs(aux_fan_rpm_smooth - target_rpm) / target_rpm
+            fan_color = "GREEN" if rpm_error <= 0.10 else "YELLOW"
+        draw.text((LPad + 40, drawpos), fan_text, fill=fan_color, font=SmallFont)
         drawpos = drawpos + SmallFontSize + TextPadding
 
         text = collector.Uptime
