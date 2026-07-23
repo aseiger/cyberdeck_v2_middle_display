@@ -225,7 +225,7 @@ try:
     # to the fan's full range, so gains are dimensionless. Gains are kept low
     # because the 0.5s tach window is noisy (~40 pulses/sample) and the
     # feedforward term already does most of the work.
-    fan_pid = PIDController(kp=0.1, ki=0.08, kd=0.0, output_min=-0.25, output_max=0.25)
+    fan_pid = PIDController(kp=0.05, ki=0.05, kd=0.0, output_min=-0.25, output_max=0.25)
     aux_fan_rpm_smooth = 0.0
     AUX_FAN_RPM_SMOOTHING = 0.3  # EMA weight per 0.5s sample (~1.4s time constant)
 
@@ -343,10 +343,7 @@ try:
         # NMEA activity blinker: small circle to the right of "GPS"
         nmea_blink_x = gps_x + 32
         nmea_blink_y = gps_y + 7
-        if gps_collector.Connected and gps_collector.NMEAActive:
-            # Blink on/off every second when NMEA sentences are arriving
-            nmea_color = "GREEN" if (time.monotonic() % 2) < 1 else "BLACK"
-        elif gps_collector.Connected:
+        if gps_collector.Connected:
             # Solid green when connected but no NMEA data yet
             nmea_color = "GREEN"
         else:
