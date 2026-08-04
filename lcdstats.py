@@ -13,7 +13,7 @@ import atexit
 import spidev as SPI
 sys.path.append(".")
 from lib import LCD_2inch4
-from PIL import Image,ImageChops,ImageDraw,ImageFont
+from PIL import Image,ImageChops,ImageDraw,ImageEnhance,ImageFont
 from gpiozero import PWMOutputDevice, Button
 import glob
 import systemStats
@@ -199,6 +199,14 @@ try:
     disp.bl_DutyCycle(100)
     last_ipc_server_brightness = -1.0
 
+    background_path = os.path.join(os.path.dirname(__file__), "pic", "cyberpunk_bg.png")
+    background_image = Image.open(background_path).convert("RGB")
+    background_image = ImageEnhance.Brightness(background_image).enhance(0.25)
+    if background_image.size != (disp.width, disp.height):
+        raise ValueError(
+            f"Background image must be {disp.width}x{disp.height}, got {background_image.size}"
+        )
+
     # Start IPC server for GTK applet communication
     ipc_server = display_server.DisplayControlServer(
         socket_path="/tmp/lcdstats.sock",
@@ -264,8 +272,7 @@ try:
             disp.bl_DutyCycle(ipc_server.brightness)
         last_ipc_server_brightness = ipc_server.brightness
 
-        # Create blank image for drawing.
-        image1 = Image.new("RGB", (disp.width, disp.height ), "BLACK")
+        image1 = background_image.copy()
         draw = ImageDraw.Draw(image1)
 
         FontBigSize = 46
