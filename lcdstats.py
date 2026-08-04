@@ -13,7 +13,7 @@ import atexit
 import spidev as SPI
 sys.path.append(".")
 from lib import LCD_2inch4
-from PIL import Image,ImageDraw,ImageFont
+from PIL import Image,ImageChops,ImageDraw,ImageFont
 from gpiozero import PWMOutputDevice, Button
 import glob
 import systemStats
@@ -32,63 +32,59 @@ def RedGreenColorScale(value : float, invert : bool = False):
     else: return (int(lowValue), int(highValue), 0)
 
 
-def SignedValueColor(value: float):
-    # Positive and negative values are highlighted to show charge direction.
-    if value > 0.01:
+def SOCColor(pct: float):
+    if pct >= 25:
         return "GREEN"
-    if value < -0.01:
-        return "RED"
-    return "YELLOW"
+    ratio = max(0.0, pct) / 25.0
+    return (int(255 * (1.0 - ratio)), int(255 * ratio), 0)
 
 
-class PIDController:
-    """A simple PID controller for fan speed control."""
-    
-    def __init__(self, kp=1.0, ki=0.8, kd=0.1, output_min=0.0, output_max=1.0):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.output_min = output_min
-        self.output_max = output_max
-        
-        self.previous_error = 0.0
-        self.integral = 0.0
-        self.previous_time = time.monotonic()
-        
-    def compute(self, setpoint, measured_value):
-        """Compute the PID output given a setpoint and measured value."""
-        current_time = time.monotonic()
-        dt = current_time - self.previous_time
-        
-        if dt <= 0:
-            return 0.0
-            
-        error = setpoint - measured_value
-        self.integral += error * dt
-        # Anti-windup: keep the integral term within the output range.
-        if self.ki > 0:
-            self.integral = max(self.output_min / self.ki,
-                                min(self.output_max / self.ki, self.integral))
-        derivative = (error - self.previous_error) / dt
-        
-        # PID output
-        output = (self.kp * error + 
-                 self.ki * self.integral + 
-                 self.kd * derivative)
-        
-        # Clamp output to valid range
-        output = max(self.output_min, min(self.output_max, output))
-        
-        self.previous_error = error
-        self.previous_time = current_time
-        
-        return output
+def ChangedTileRegions(previous_image, current_image, tile_size=16):
+    difference = ImageChops.difference(previous_image, current_image)
+    width, height = current_image.size
 
-    def reset(self):
-        """Clear accumulated state (use when the loop is disabled)."""
-        self.previous_error = 0.0
-        self.integral = 0.0
-        self.previous_time = time.monotonic()
+    for top in range(0, height, tile_size):
+        bottom = min(top + tile_size, height)
+        run_left = None
+
+        for left in range(0, width, tile_size):
+            right = min(left + tile_size, width)
+            changed = difference.crop((left, top, right, bottom)).getbbox() is not None
+            if changed and run_left is None:
+                run_left = left
+            elif not changed and run_left is not None:
+                yield (run_left, top, left, bottom)
+                run_left = None
+
+        if run_left is not None:
+            yield (run_left, top, width, bottom)
+
+
+def ShowImageRegion(display, image, x_start, y_start):
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return
+    if x_start < 0 or y_start < 0 or x_start + width > display.width or y_start + height > display.height:
+        raise ValueError("Image region is outside the display bounds")
+
+    rgb = display.np.asarray(image.convert("RGB"))
+    pixels = display.np.zeros((height, width, 2), dtype=display.np.uint8)
+    pixels[..., [0]] = display.np.add(
+        display.np.bitwise_and(rgb[..., [0]], 0xF8),
+        display.np.right_shift(rgb[..., [1]], 5),
+    )
+    pixels[..., [1]] = display.np.add(
+        display.np.bitwise_and(display.np.left_shift(rgb[..., [1]], 3), 0xE0),
+        display.np.right_shift(rgb[..., [2]], 3),
+    )
+
+    buffer = pixels.flatten().tolist()
+    display.command(0x36)
+    display.data(0x08)
+    display.SetWindows(x_start, y_start, x_start + width, y_start + height)
+    display.digital_write(display.DC_PIN, True)
+    for offset in range(0, len(buffer), 4096):
+        display.spi_writebyte(buffer[offset:offset + 4096])
 
 
 class FanTachometer:
@@ -124,12 +120,10 @@ device = 0
 CASE_FAN = 13
 FAN_TACH = 17                      # BCM pin wired to the aux fan tach output (found via detect_tach.py)
 AUX_FAN_PULSES_PER_REV = 2
-AUX_FAN_MAX_RPM = 4600.0           # measured at 100% duty via detect_tach.py
-AUX_FAN_STOP_RPM = 300.0           # below this target RPM, just stop the fan
+CPU_FAN_PWM_GLOB = "/sys/devices/platform/cooling_fan/hwmon/*/pwm1"
 CPU_FAN_RPM_GLOB = "/sys/devices/platform/cooling_fan/hwmon/*/fan1_input"
-DISPLAY_POLL_INTERVAL_SECONDS = 0.5
-BATTERY_CHARGE_FAN_BOOST_A = 0.5  # Enable fan floor above 500 mA charging current.
-BATTERY_CHARGE_FAN_MIN_RPM = 0.5 * AUX_FAN_MAX_RPM  # RPM floor while charge boost is active.
+AUX_FAN_CURVE_EXPONENT = 2.0
+DISPLAY_POLL_INTERVAL_SECONDS = 0.25
 logging.basicConfig(level=logging.DEBUG)
 
 case_fan = None
@@ -221,13 +215,7 @@ try:
     battery_collector = None
     next_battery_init_attempt = 0.0
     fan_tach = FanTachometer(FAN_TACH, pulses_per_rev=AUX_FAN_PULSES_PER_REV)
-    # PID trims around the feedforward duty; error and output are normalized
-    # to the fan's full range, so gains are dimensionless. Gains are kept low
-    # because the 0.5s tach window is noisy (~40 pulses/sample) and the
-    # feedforward term already does most of the work.
-    fan_pid = PIDController(kp=0.05, ki=0.05, kd=0.0, output_min=-0.25, output_max=0.25)
-    aux_fan_rpm_smooth = 0.0
-    AUX_FAN_RPM_SMOOTHING = 0.3  # EMA weight per 0.5s sample (~1.4s time constant)
+    displayed_image = None
 
     while True:
         now = time.monotonic()
@@ -248,9 +236,15 @@ try:
                 battery_collector = None
                 next_battery_init_attempt = now + 5.0
 
-        battery_current_for_fan = battery_sample["current"] if battery_sample is not None else 0.0
+        cpu_fan_pwm = 255
+        for pwm_path in glob.glob(CPU_FAN_PWM_GLOB):
+            try:
+                with open(pwm_path) as f:
+                    cpu_fan_pwm = int(f.read())
+                break
+            except (OSError, ValueError):
+                pass
 
-        # Setpoint: match the Pi's built-in fan RPM (fan1_input reports RPM directly).
         cpu_fan_rpm = 0.0
         for rpm_path in glob.glob(CPU_FAN_RPM_GLOB):
             try:
@@ -260,27 +254,9 @@ try:
             except (OSError, ValueError):
                 pass
 
-        target_rpm = cpu_fan_rpm
-        if battery_current_for_fan > BATTERY_CHARGE_FAN_BOOST_A:
-            target_rpm = max(target_rpm, BATTERY_CHARGE_FAN_MIN_RPM)
-        target_rpm = min(target_rpm, AUX_FAN_MAX_RPM)
-
         aux_fan_rpm = fan_tach.read_rpm()
-        # Smooth the noisy per-window tach reading before it reaches the PID.
-        aux_fan_rpm_smooth += (aux_fan_rpm - aux_fan_rpm_smooth) * AUX_FAN_RPM_SMOOTHING
-
-        if target_rpm < AUX_FAN_STOP_RPM:
-            # Below the aux fan's usable range: stop it and reset the loop.
-            fan_pid.reset()
-            aux_fan_rpm_smooth = 0.0
-            case_fan.value = 0.0
-        else:
-            # Feedforward gets close to the right duty; PID trims out the
-            # remaining RPM error (both normalized to the fan's full range).
-            feedforward = target_rpm / AUX_FAN_MAX_RPM
-            trim = fan_pid.compute(target_rpm / AUX_FAN_MAX_RPM,
-                                   aux_fan_rpm_smooth / AUX_FAN_MAX_RPM)
-            case_fan.value = max(0.0, min(1.0, feedforward + trim))
+        aux_fan_duty = pow(cpu_fan_pwm / 255.0, AUX_FAN_CURVE_EXPONENT)
+        case_fan.value = max(0.0, min(1.0, aux_fan_duty))
 
 
         # Sync LCD backlight with main display brightness
@@ -400,15 +376,8 @@ try:
 
         text = "Fan:"
         draw.text((LPad, drawpos), text, fill="YELLOW", font=SmallFont)
-        if target_rpm < AUX_FAN_STOP_RPM:
-            fan_text = "off"
-            fan_color = (120, 120, 120)
-        else:
-            fan_text = f"{aux_fan_rpm_smooth:4.0f} / {target_rpm:4.0f} rpm"
-            # Green when tracking within 10% of target, yellow otherwise.
-            rpm_error = abs(aux_fan_rpm_smooth - target_rpm) / target_rpm
-            fan_color = "GREEN" if rpm_error <= 0.10 else "YELLOW"
-        draw.text((LPad + 40, drawpos), fan_text, fill=fan_color, font=SmallFont)
+        fan_text = f"CPU {cpu_fan_rpm:4.0f}  AUX {aux_fan_rpm:4.0f}"
+        draw.text((LPad + 40, drawpos), fan_text, fill="GREEN", font=SmallFont)
         drawpos = drawpos + SmallFontSize + TextPadding
 
         text = collector.Uptime
@@ -434,36 +403,31 @@ try:
             battery_current = battery_sample["current"]
             battery_power = battery_sample["power"]
             battery_pct = battery_sample["percentage"]
-            current_color = SignedValueColor(battery_current)
+            current_color = RedGreenColorScale(
+                abs(battery_current) / 3.0 * 100,
+                invert=True,
+            )
 
             draw.text((LPad, drawpos), f"V: {battery_voltage:5.2f}V", fill="CYAN", font=SmallFont)
             draw.text((LPad + 116, drawpos), f"I: {battery_current:5.2f}A", fill=current_color, font=SmallFont)
             drawpos = drawpos + SmallFontSize + TextPadding
 
             draw.text((LPad, drawpos), f"P: {battery_power:5.2f}W", fill="CYAN", font=SmallFont)
-            draw.text((LPad + 116, drawpos), f"SOC: {battery_pct:5.1f}%", fill=RedGreenColorScale(battery_pct), font=SmallFont)
+            draw.text((LPad + 116, drawpos), f"SOC: {battery_pct:5.1f}%", fill=SOCColor(battery_pct), font=SmallFont)
             drawpos = drawpos + SmallFontSize + TextPadding
 
-        bar_left = LPad
-        bar_top = disp.height - 10
-        bar_height = 6
-        bar_width = disp.width - (LPad * 2)
-        bar_fill_w = int(bar_width * max(0.0, min(100.0, battery_pct)) / 100.0)
-
-        draw.rectangle(
-            [(bar_left, bar_top), (bar_left + bar_width, bar_top + bar_height)],
-            fill=(22, 22, 22),
-            outline=(140, 140, 140),
-            width=2,
-        )
-        if bar_fill_w > 0:
-            draw.rectangle(
-                [(bar_left + 1, bar_top + 1), (bar_left + bar_fill_w - 1, bar_top + bar_height - 1)],
-                fill=RedGreenColorScale(battery_pct),
-            )
+        drawpos = drawpos + DividerHeight
+        drawpos = drawpos + DividerHeight
+        draw.line([(0, drawpos), (240, drawpos)], fill=DividerColor, width=DividerHeight)
 
         image1=image1.rotate(0)
-        disp.ShowImage(image1)
+        if displayed_image is None:
+            disp.ShowImage(image1)
+        else:
+            for region in ChangedTileRegions(displayed_image, image1):
+                left, top, right, bottom = region
+                ShowImageRegion(disp, image1.crop(region), left, top)
+        displayed_image = image1
         
         time.sleep(DISPLAY_POLL_INTERVAL_SECONDS)
 
