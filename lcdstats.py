@@ -14,7 +14,8 @@ import spidev as SPI
 sys.path.append(".")
 from lib import LCD_2inch4
 from PIL import Image,ImageChops,ImageDraw,ImageEnhance,ImageFont
-from gpiozero import PWMOutputDevice, Button
+from gpiozero import Button
+from lib.lcdconfig import HardwarePWM
 import glob
 import systemStats
 import batteryStats
@@ -123,6 +124,7 @@ AUX_FAN_PULSES_PER_REV = 2
 CPU_FAN_PWM_GLOB = "/sys/devices/platform/cooling_fan/hwmon/*/pwm1"
 CPU_FAN_RPM_GLOB = "/sys/devices/platform/cooling_fan/hwmon/*/fan1_input"
 AUX_FAN_CURVE_EXPONENT = 2.0
+AUX_FAN_SMOOTHING_TIME = 3.0       # exponential smoothing time constant (seconds)
 DISPLAY_POLL_INTERVAL_SECONDS = 0.25
 logging.basicConfig(level=logging.DEBUG)
 
@@ -213,7 +215,7 @@ try:
     )
     ipc_server.start()
     
-    case_fan = PWMOutputDevice(CASE_FAN, initial_value=0.0)
+    case_fan = HardwarePWM(CASE_FAN, frequency=1000)
     case_fan.value = 0.0
 
     i = 0
@@ -224,9 +226,14 @@ try:
     next_battery_init_attempt = 0.0
     fan_tach = FanTachometer(FAN_TACH, pulses_per_rev=AUX_FAN_PULSES_PER_REV)
     displayed_image = None
+    smoothed_aux_duty = 0.0          # smoothed PWM duty for aux fan
+    last_aux_duty = -1.0             # last written duty, avoid unnecessary writes
+    last_loop_time = time.monotonic() # track actual iteration delta for smoothing
 
     while True:
         now = time.monotonic()
+        dt = now - last_loop_time       # actual time since last iteration
+        last_loop_time = now
         battery_sample = None
 
         if battery_collector is None and now >= next_battery_init_attempt:
@@ -263,8 +270,13 @@ try:
                 pass
 
         aux_fan_rpm = fan_tach.read_rpm()
-        aux_fan_duty = pow(cpu_fan_pwm / 255.0, AUX_FAN_CURVE_EXPONENT)
-        case_fan.value = max(0.0, min(1.0, aux_fan_duty))
+        target_duty = pow(cpu_fan_pwm / 255.0, AUX_FAN_CURVE_EXPONENT)
+        alpha = min(dt / AUX_FAN_SMOOTHING_TIME, 1.0)  # use actual elapsed time, clamp to 1.0
+        smoothed_aux_duty += alpha * (target_duty - smoothed_aux_duty)
+        new_duty = max(0.0, min(1.0, smoothed_aux_duty))
+        if abs(new_duty - last_aux_duty) > 0.01:  # only write if change is meaningful
+            case_fan.value = new_duty
+            last_aux_duty = new_duty
 
 
         # Sync LCD backlight with main display brightness
