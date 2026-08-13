@@ -17,6 +17,7 @@ from PIL import Image,ImageChops,ImageDraw,ImageEnhance,ImageFont
 from gpiozero import Button
 from lib.lcdconfig import HardwarePWM
 import glob
+import json
 import systemStats
 import batteryStats
 import gpsStats
@@ -123,8 +124,10 @@ FAN_TACH = 17                      # BCM pin wired to the aux fan tach output (f
 AUX_FAN_PULSES_PER_REV = 2
 CPU_FAN_PWM_GLOB = "/sys/devices/platform/cooling_fan/hwmon/*/pwm1"
 CPU_FAN_RPM_GLOB = "/sys/devices/platform/cooling_fan/hwmon/*/fan1_input"
-AUX_FAN_CURVE_EXPONENT = 2.0
-AUX_FAN_SMOOTHING_TIME = 3.0       # exponential smoothing time constant (seconds)
+# --- Aux fan control ---
+AUX_FAN_CURVE_FILE = os.path.join(os.path.dirname(__file__), "aux_fan_curve.json")
+AUX_FAN_TARGET_RPM_RATIO = 1.0     # aux target RPM = CPU fan RPM * this ratio
+AUX_FAN_SMOOTHING_TIME = 1.0       # exponential smoothing time constant (seconds)
 DISPLAY_POLL_INTERVAL_SECONDS = 0.25
 logging.basicConfig(level=logging.DEBUG)
 
@@ -188,6 +191,45 @@ atexit.register(cleanup_and_exit)
 signal.signal(signal.SIGTERM, cleanup_and_exit)
 signal.signal(signal.SIGINT, cleanup_and_exit)
 
+
+def _rpm_to_duty(target_rpm, curve):
+    """Reverse-lookup: given a target RPM, return the PWM duty from the curve.
+
+    curve is a list of {"pwm": float, "rpm": float} dicts sorted by PWM.
+    Uses linear interpolation between the two nearest entries.
+    """
+    if not curve:
+        return 0.0
+
+    # Clamp to curve bounds
+    min_rpm = curve[0]["rpm"]
+    max_rpm = curve[-1]["rpm"]
+
+    if target_rpm <= 0:
+        return 0.0
+    if target_rpm <= min_rpm:
+        return 0.0
+    if target_rpm >= max_rpm:
+        return 1.0
+
+    # Find bracketing entries
+    for i in range(len(curve) - 1):
+        lo = curve[i]
+        hi = curve[i + 1]
+        if lo["rpm"] <= target_rpm <= hi["rpm"]:
+            if hi["rpm"] == lo["rpm"]:
+                return lo["pwm"]
+            frac = (target_rpm - lo["rpm"]) / (hi["rpm"] - lo["rpm"])
+            return lo["pwm"] + frac * (hi["pwm"] - lo["pwm"])
+        if hi["rpm"] <= target_rpm <= lo["rpm"]:
+            if lo["rpm"] == hi["rpm"]:
+                return lo["pwm"]
+            frac = (target_rpm - hi["rpm"]) / (lo["rpm"] - hi["rpm"])
+            return hi["pwm"] + frac * (lo["pwm"] - hi["pwm"])
+
+    return 1.0
+
+
 try:
     # display with hardware SPI:
     ''' Warning!!!Don't  creation of multiple displayer objects!!! '''
@@ -225,6 +267,16 @@ try:
     battery_collector = None
     next_battery_init_attempt = 0.0
     fan_tach = FanTachometer(FAN_TACH, pulses_per_rev=AUX_FAN_PULSES_PER_REV)
+
+    # Load PWM→RPM lookup table
+    aux_fan_curve = None
+    try:
+        with open(AUX_FAN_CURVE_FILE) as f:
+            aux_fan_curve = json.load(f)["curve"]
+        logging.info("Loaded aux fan curve with %d entries", len(aux_fan_curve))
+    except Exception as e:
+        logging.warning("Could not load aux fan curve (%s), using fallback", e)
+
     displayed_image = None
     smoothed_aux_duty = 0.0          # smoothed PWM duty for aux fan
     last_aux_duty = -1.0             # last written duty, avoid unnecessary writes
@@ -269,12 +321,22 @@ try:
             except (OSError, ValueError):
                 pass
 
+        # --- Aux fan: lookup-table control ---
         aux_fan_rpm = fan_tach.read_rpm()
-        target_duty = pow(cpu_fan_pwm / 255.0, AUX_FAN_CURVE_EXPONENT)
-        alpha = min(dt / AUX_FAN_SMOOTHING_TIME, 1.0)  # use actual elapsed time, clamp to 1.0
+        target_rpm = cpu_fan_rpm * AUX_FAN_TARGET_RPM_RATIO
+
+        if aux_fan_curve:
+            # Reverse-lookup: find the PWM duty that produces target_rpm
+            # by interpolating the stored PWM→RPM curve.
+            target_duty = _rpm_to_duty(target_rpm, aux_fan_curve)
+        else:
+            # Fallback: linear approximation (0% PWM → 0 RPM, 100% → max RPM)
+            target_duty = min(1.0, target_rpm / 5000.0)
+
+        alpha = min(dt / AUX_FAN_SMOOTHING_TIME, 1.0)
         smoothed_aux_duty += alpha * (target_duty - smoothed_aux_duty)
         new_duty = max(0.0, min(1.0, smoothed_aux_duty))
-        if abs(new_duty - last_aux_duty) > 0.01:  # only write if change is meaningful
+        if abs(new_duty - last_aux_duty) > 0.01:
             case_fan.value = new_duty
             last_aux_duty = new_duty
 
