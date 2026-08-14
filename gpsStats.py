@@ -89,6 +89,22 @@ class GPSStatisticsCollector:
             return (time.monotonic() - self._pps_last_seen) < self._pps_timeout_seconds
 
     @property
+    def ClockGoverned(self):
+        """True when the system clock is likely being disciplined by GPS.
+
+        Requires both a valid fix (2D or 3D) AND active PPS — i.e. the
+        receiver has a position lock and the hardware 1PPS edge is
+        reaching gpsd.
+        """
+        with self._lock:
+            if not self._connected:
+                return False
+            has_fix = self._fix_mode >= 2
+            pps_alive = (self._pps_last_seen > 0.0) and \
+                        (time.monotonic() - self._pps_last_seen) < self._pps_timeout_seconds
+            return has_fix and pps_alive
+
+    @property
     def Altitude(self):
         """Altitude in meters (MSL)."""
         with self._lock:

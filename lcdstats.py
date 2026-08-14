@@ -382,33 +382,26 @@ try:
             gps_has_fix = gps_collector.FixMode >= 2
             gps_color = "GREEN" if gps_has_fix else "YELLOW"
             gps_signal_text = f"{gps_collector.SatsUsed}/{gps_collector.SatsVisible}"
-            if gps_collector.PPSActive:
-                gps_pps_text = "OK"
-                gps_pps_color = "GREEN"
-            else:
-                gps_pps_text = "--"
-                gps_pps_color = (120, 120, 120)
+            gps_clock_governed = gps_collector.ClockGoverned
         else:
             gps_fix_text = "No GPS"
             gps_color = "RED"
             gps_signal_text = "--/--"
-            gps_pps_text = "--"
-            gps_pps_color = (120, 120, 120)
+            gps_clock_governed = False
 
         draw.text((gps_x, gps_y), "GPS", fill="CYAN", font=GPSFont)
 
-        # NMEA activity blinker: small circle to the right of "GPS"
-        nmea_blink_x = gps_x + 32
-        nmea_blink_y = gps_y + 7
-        if gps_collector.Connected:
-            # Solid green when connected but no NMEA data yet
-            nmea_color = "GREEN"
-        else:
-            nmea_color = "RED"
-        draw.ellipse([nmea_blink_x, nmea_blink_y, nmea_blink_x + 6, nmea_blink_y + 6], fill=nmea_color)
+        # Clock-governed indicator: small circle to the right of "GPS"
+        # Green = clock is GPS-disciplined, red = not
+        clock_blink_x = gps_x + 32
+        clock_blink_y = gps_y + 7
+        clock_color = "GREEN" if gps_clock_governed else "RED"
+        draw.ellipse([clock_blink_x, clock_blink_y, clock_blink_x + 6, clock_blink_y + 6], fill=clock_color)
         draw.text((gps_x, gps_y + gps_line), f"Fix {gps_fix_text}", fill=gps_color, font=GPSFont)
         draw.text((gps_x, gps_y + gps_line * 2), f"Sig {gps_signal_text}", fill=gps_color, font=GPSFont)
-        draw.text((gps_x, gps_y + gps_line * 3), f"PPS {gps_pps_text}", fill=gps_pps_color, font=GPSFont)
+        clock_text = "YES" if gps_clock_governed else "NO"
+        clock_text_color = "GREEN" if gps_clock_governed else "RED"
+        draw.text((gps_x, gps_y + gps_line * 3), f"Clock {clock_text}", fill=clock_text_color, font=GPSFont)
 
 
         drawpos = drawpos + FontBigSize + TextPadding
@@ -429,8 +422,10 @@ try:
             draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
             drawpos = drawpos + SmallFontSize + TextPadding
 
-            text = collector._WIFI_QUALITY + "%  " + collector._WIFI_RSSI
-            draw.text((LPad, drawpos), text, fill = RedGreenColorScale(float(collector._WIFI_QUALITY)),font=SmallFont)
+            wifi_line = collector._WIFI_QUALITY + "%  " + collector._WIFI_RSSI
+            if collector._WIFI_FREQ:
+                wifi_line += "  " + collector._WIFI_FREQ
+            draw.text((LPad, drawpos), wifi_line, fill = RedGreenColorScale(float(collector._WIFI_QUALITY)),font=SmallFont)
             drawpos = drawpos + SmallFontSize + TextPadding
 
         drawpos = drawpos + DividerHeight

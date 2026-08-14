@@ -33,6 +33,7 @@ class SystemStatisticsCollector :
         self._WIFI_SSID = ""
         self._WIFI_RSSI = ""
         self._WIFI_QUALITY = ""
+        self._WIFI_FREQ = ""
         self._Hostname = ""
         self._CPUUsage = ""
         self._CPUTemp = ""
@@ -46,6 +47,7 @@ class SystemStatisticsCollector :
         self.get_wifi_ssid()
         self.get_wifi_rssi()
         self.get_wifi_quality()
+        self.get_wifi_freq()
         self.get_hostname()
         self.get_cpu_usage()
         self.get_cpu_temp()
@@ -69,7 +71,11 @@ class SystemStatisticsCollector :
     @property
     def WIFI_QUALITY(self):
         return self._WIFI_QUALITY
-    
+
+    @property
+    def WIFI_FREQ(self):
+        return self._WIFI_FREQ
+
     @property
     def Hostname(self):
         return self._Hostname
@@ -118,6 +124,26 @@ class SystemStatisticsCollector :
         cmd = "iwconfig 2>/dev/null | grep 'Signal level' | awk -F'=' '{print $2}' | awk '{print $1}' | awk -F'/' '{print 100*($1/$2) }'"
         self._WIFI_QUALITY = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
         threading.Timer(5, self.get_wifi_quality).start()
+
+    def get_wifi_freq(self):
+        # iw dev wlan0 link reports frequency in MHz (e.g. "freq: 2437")
+        cmd = "iw dev wlan0 link 2>/dev/null | grep 'freq:' | awk '{print $2}'"
+        try:
+            freq_mhz = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+            if freq_mhz:
+                try:
+                    mhz = float(freq_mhz)
+                    if mhz < 3000:
+                        self._WIFI_FREQ = "2.4 GHz"
+                    else:
+                        self._WIFI_FREQ = "5 GHz"
+                except ValueError:
+                    self._WIFI_FREQ = ""
+            else:
+                self._WIFI_FREQ = ""
+        except subprocess.CalledProcessError:
+            self._WIFI_FREQ = ""
+        threading.Timer(5, self.get_wifi_freq).start()
 
     def get_hostname(self):
         cmd = "hostname"
