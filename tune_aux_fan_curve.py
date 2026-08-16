@@ -36,9 +36,9 @@ OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "aux_fan_curve.json")
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_STEPS = 11            # number of PWM steps (0..1 inclusive)
-DEFAULT_SETTLE_S = 4.0        # seconds to wait at each step before reading
-DEFAULT_READ_S = 2.0          # seconds to average RPM at each step
+DEFAULT_STEPS = 51            # number of PWM steps (0..1 inclusive)
+DEFAULT_SETTLE_S = 10.0        # seconds to wait at each step before reading
+DEFAULT_READ_S = 5.0          # seconds to average RPM at each step
 
 
 class TachReader:
