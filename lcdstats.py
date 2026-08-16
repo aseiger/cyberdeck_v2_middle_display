@@ -233,7 +233,7 @@ def _rpm_to_duty(target_rpm, curve):
 try:
     # display with hardware SPI:
     ''' Warning!!!Don't  creation of multiple displayer objects!!! '''
-    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=5000000,rst=RST,dc=DC,bl=BL)
+    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=15000000,rst=RST,dc=DC,bl=BL)
     # disp = LCD_2inch4.LCD_2inch4()
     # Initialize library.
     disp.Init()
