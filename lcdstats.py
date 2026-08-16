@@ -241,7 +241,7 @@ try:
     disp.clear()
     #Set the backlight to 100
     disp.bl_DutyCycle(100)
-    last_ipc_server_brightness = -1.0
+    last_lcd_brightness = -1.0
 
     background_path = os.path.join(os.path.dirname(__file__), "pic", "cyberpunk_bg.png")
     background_image = Image.open(background_path).convert("RGB")
@@ -341,10 +341,10 @@ try:
             last_aux_duty = new_duty
 
 
-        # Sync LCD backlight with main display brightness
-        if ipc_server.has_brightness and ipc_server.brightness != last_ipc_server_brightness:
-            disp.bl_DutyCycle(ipc_server.brightness)
-        last_ipc_server_brightness = ipc_server.brightness
+        # Sync SPI LCD backlight with the dedicated lcd_brightness value
+        if ipc_server.has_lcd_brightness and ipc_server.lcd_brightness != last_lcd_brightness:
+            disp.bl_DutyCycle(ipc_server.lcd_brightness)
+        last_lcd_brightness = ipc_server.lcd_brightness
 
         image1 = background_image.copy()
         draw = ImageDraw.Draw(image1)

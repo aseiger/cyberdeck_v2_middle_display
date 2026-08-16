@@ -81,14 +81,18 @@ External clients can connect to the Unix domain socket at `/tmp/lcdstats.sock` u
 
 ```json
 {"type": "brightness", "value": 75}
+{"type": "lcd_brightness", "value": 75}
 {"type": "volume", "value": 50}
 {"type": "get_status"}
 ```
 
+- `brightness` — main display brightness (0–100)
+- `lcd_brightness` — SPI LCD backlight duty cycle (0–100), independent of the main display brightness
+
 **Server → Client:**
 
 ```json
-{"type": "status", "brightness": 75.0, "volume": 50.0}
+{"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0}
 ```
 
 ## Project Structure

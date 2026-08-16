@@ -7,12 +7,13 @@ lcdstats.py and external clients (e.g. GTK brightness/volume applet).
 Protocol: JSON Lines (one JSON object per line, terminated by \n).
 
 Client -> Server messages:
-  {"type": "brightness", "value": 75}   # LCD backlight duty cycle 0-100
-  {"type": "volume",     "value": 50}   # system volume 0-100
-  {"type": "get_status"}                 # request current state
+  {"type": "brightness",     "value": 75}   # main display brightness 0-100
+  {"type": "lcd_brightness", "value": 75}   # SPI LCD backlight duty cycle 0-100
+  {"type": "volume",         "value": 50}   # system volume 0-100
+  {"type": "get_status"}                     # request current state
 
 Server -> Client messages (sent in response to get_status):
-  {"type": "status", "brightness": 75, "volume": 50}
+  {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50}
 """
 
 import json
@@ -36,6 +37,7 @@ class DisplayControlServer:
         # Shared state (protected by lock)
         self._lock = threading.Lock()
         self._brightness = -1.0   # -1 means "no value received yet"
+        self._lcd_brightness = -1.0  # SPI LCD backlight, -1 means "no value received yet"
         self._volume = -1.0
 
         self._server_sock = None
@@ -51,6 +53,11 @@ class DisplayControlServer:
             return self._brightness
 
     @property
+    def lcd_brightness(self):
+        with self._lock:
+            return self._lcd_brightness
+
+    @property
     def volume(self):
         with self._lock:
             return self._volume
@@ -59,6 +66,11 @@ class DisplayControlServer:
     def has_brightness(self):
         with self._lock:
             return self._brightness >= 0
+
+    @property
+    def has_lcd_brightness(self):
+        with self._lock:
+            return self._lcd_brightness >= 0
 
     @property
     def has_volume(self):
@@ -176,6 +188,12 @@ class DisplayControlServer:
                 self._brightness = max(0.0, min(100.0, value))
             logger.debug("Brightness -> %.1f", self._brightness)
 
+        elif msg_type == "lcd_brightness":
+            value = float(msg.get("value", 0))
+            with self._lock:
+                self._lcd_brightness = max(0.0, min(100.0, value))
+            logger.debug("LCD brightness -> %.1f", self._lcd_brightness)
+
         elif msg_type == "volume":
             value = float(msg.get("value", 0))
             with self._lock:
@@ -193,6 +211,7 @@ class DisplayControlServer:
             return json.dumps({
                 "type": "status",
                 "brightness": round(self._brightness, 1),
+                "lcd_brightness": round(self._lcd_brightness, 1),
                 "volume": round(self._volume, 1),
             }) + "\n"
 
