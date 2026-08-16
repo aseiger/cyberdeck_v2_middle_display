@@ -10,10 +10,11 @@ Client -> Server messages:
   {"type": "brightness",     "value": 75}   # main display brightness 0-100
   {"type": "lcd_brightness", "value": 75}   # SPI LCD backlight duty cycle 0-100
   {"type": "volume",         "value": 50}   # system volume 0-100
+  {"type": "view",           "value": 1}    # switch to screen view N
   {"type": "get_status"}                     # request current state
 
 Server -> Client messages (sent in response to get_status):
-  {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50}
+  {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50, "view": 0}
 """
 
 import json
@@ -39,6 +40,7 @@ class DisplayControlServer:
         self._brightness = -1.0   # -1 means "no value received yet"
         self._lcd_brightness = -1.0  # SPI LCD backlight, -1 means "no value received yet"
         self._volume = -1.0
+        self._current_view = 0    # active screen view index
 
         self._server_sock = None
         self._clients = []        # list of connected client sockets
@@ -61,6 +63,15 @@ class DisplayControlServer:
     def volume(self):
         with self._lock:
             return self._volume
+
+    @property
+    def current_view(self):
+        with self._lock:
+            return self._current_view
+
+    def set_view(self, view_index):
+        with self._lock:
+            self._current_view = max(0, view_index)
 
     @property
     def has_brightness(self):
@@ -200,6 +211,12 @@ class DisplayControlServer:
                 self._volume = max(0.0, min(100.0, value))
             logger.debug("Volume -> %.1f", self._volume)
 
+        elif msg_type == "view":
+            value = int(msg.get("value", 0))
+            with self._lock:
+                self._current_view = max(0, value)
+            logger.debug("View -> %d", self._current_view)
+
         elif msg_type == "get_status":
             self._send_status(client)
 
@@ -213,6 +230,7 @@ class DisplayControlServer:
                 "brightness": round(self._brightness, 1),
                 "lcd_brightness": round(self._lcd_brightness, 1),
                 "volume": round(self._volume, 1),
+                "view": self._current_view,
             }) + "\n"
 
     def _send_status(self, client):

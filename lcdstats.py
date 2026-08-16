@@ -281,6 +281,7 @@ try:
     smoothed_aux_duty = 0.0          # smoothed PWM duty for aux fan
     last_aux_duty = -1.0             # last written duty, avoid unnecessary writes
     last_loop_time = time.monotonic() # track actual iteration delta for smoothing
+    current_view = 0                 # active screen view index
 
     while True:
         now = time.monotonic()
@@ -346,6 +347,9 @@ try:
             disp.bl_DutyCycle(ipc_server.lcd_brightness)
         last_lcd_brightness = ipc_server.lcd_brightness
 
+        # Sync active view
+        current_view = ipc_server.current_view
+
         image1 = background_image.copy()
         draw = ImageDraw.Draw(image1)
 
@@ -369,132 +373,146 @@ try:
 
         draw.rectangle([(0, 0), (disp.width, disp.height)], outline=DividerColor, width=5)
 
-        text = str(datetime.datetime.now().strftime('%H:%M'))
-        draw.text((LPad, drawpos), text, fill = "WHITE",font=FontBig)
+        # ── View 0: Full Dashboard (default) ──────────────────────
+        if current_view == 0:
+            text = str(datetime.datetime.now().strftime('%H:%M'))
+            draw.text((LPad, drawpos), text, fill = "WHITE",font=FontBig)
 
-        # GPS status indicator occupies the space freed by dropping seconds.
-        gps_x = LPad + 155
-        gps_y = drawpos
-        gps_line = GPSFontSize + 2
+            # GPS status indicator occupies the space freed by dropping seconds.
+            gps_x = LPad + 155
+            gps_y = drawpos
+            gps_line = GPSFontSize + 2
 
-        if gps_collector.Connected:
-            gps_fix_text = gps_collector.FixText
-            gps_has_fix = gps_collector.FixMode >= 2
-            gps_color = "GREEN" if gps_has_fix else "YELLOW"
-            gps_signal_text = f"{gps_collector.SatsUsed}/{gps_collector.SatsVisible}"
-            gps_clock_governed = gps_collector.ClockGoverned
-        else:
-            gps_fix_text = "No GPS"
-            gps_color = "RED"
-            gps_signal_text = "--/--"
-            gps_clock_governed = False
+            if gps_collector.Connected:
+                gps_fix_text = gps_collector.FixText
+                gps_has_fix = gps_collector.FixMode >= 2
+                gps_color = "GREEN" if gps_has_fix else "YELLOW"
+                gps_signal_text = f"{gps_collector.SatsUsed}/{gps_collector.SatsVisible}"
+                gps_clock_governed = gps_collector.ClockGoverned
+            else:
+                gps_fix_text = "No GPS"
+                gps_color = "RED"
+                gps_signal_text = "--/--"
+                gps_clock_governed = False
 
-        draw.text((gps_x, gps_y), "GPS", fill="CYAN", font=GPSFont)
+            draw.text((gps_x, gps_y), "GPS", fill="CYAN", font=GPSFont)
 
-        # Clock-governed indicator: small circle to the right of "GPS"
-        # Green = clock is GPS-disciplined, red = not
-        clock_blink_x = gps_x + 32
-        clock_blink_y = gps_y + 7
-        clock_color = "GREEN" if gps_clock_governed else "RED"
-        draw.ellipse([clock_blink_x, clock_blink_y, clock_blink_x + 6, clock_blink_y + 6], fill=clock_color)
-        draw.text((gps_x, gps_y + gps_line), f"Fix {gps_fix_text}", fill=gps_color, font=GPSFont)
-        draw.text((gps_x, gps_y + gps_line * 2), f"Sig {gps_signal_text}", fill=gps_color, font=GPSFont)
-        clock_text = "YES" if gps_clock_governed else "NO"
-        clock_text_color = "GREEN" if gps_clock_governed else "RED"
-        draw.text((gps_x, gps_y + gps_line * 3), f"Clock {clock_text}", fill=clock_text_color, font=GPSFont)
+            # Clock-governed indicator: small circle to the right of "GPS"
+            # Green = clock is GPS-disciplined, red = not
+            clock_blink_x = gps_x + 32
+            clock_blink_y = gps_y + 7
+            clock_color = "GREEN" if gps_clock_governed else "RED"
+            draw.ellipse([clock_blink_x, clock_blink_y, clock_blink_x + 6, clock_blink_y + 6], fill=clock_color)
+            draw.text((gps_x, gps_y + gps_line), f"Fix {gps_fix_text}", fill=gps_color, font=GPSFont)
+            draw.text((gps_x, gps_y + gps_line * 2), f"Sig {gps_signal_text}", fill=gps_color, font=GPSFont)
+            clock_text = "YES" if gps_clock_governed else "NO"
+            clock_text_color = "GREEN" if gps_clock_governed else "RED"
+            draw.text((gps_x, gps_y + gps_line * 3), f"Clock {clock_text}", fill=clock_text_color, font=GPSFont)
 
+            drawpos = drawpos + FontBigSize + TextPadding
 
-        drawpos = drawpos + FontBigSize + TextPadding
-        
-        text = str(datetime.datetime.now().strftime('%m-%d-%Y'))
-        draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
-        drawpos = drawpos + SmallFontSize + TextPadding
+            text = str(datetime.datetime.now().strftime('%m-%d-%Y'))
+            draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
 
-        drawpos = drawpos + DividerHeight
-        draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
+            drawpos = drawpos + DividerHeight
+            draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
 
-        text = collector.IPAddr
-        draw.text((LPad, drawpos), text, fill = "YELLOW",font=Font)
-        drawpos = drawpos + FontSize + TextPadding
+            text = collector.IPAddr
+            draw.text((LPad, drawpos), text, fill = "YELLOW",font=Font)
+            drawpos = drawpos + FontSize + TextPadding
 
-        if collector._WIFI_QUALITY != "":
-            text = collector.WIFI_SSID
+            if collector._WIFI_QUALITY != "":
+                text = collector.WIFI_SSID
+                draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
+
+                wifi_line = collector._WIFI_QUALITY + "%  " + collector._WIFI_RSSI
+                if collector._WIFI_FREQ:
+                    wifi_line += "  " + collector._WIFI_FREQ
+                draw.text((LPad, drawpos), wifi_line, fill = RedGreenColorScale(float(collector._WIFI_QUALITY)),font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
+
+            drawpos = drawpos + DividerHeight
+            draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
+
+            drawpos = drawpos + TextPadding
+            text = "CPU:"
+            draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
+            text = collector.CPUUsage + "   " + collector.CPUTemp
+            draw.text((LPad + 40, drawpos), text, fill = "GREEN",font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
+
+            text = "Mem:"
+            draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
+            text = collector.MemUsage
+            draw.text((LPad + 40, drawpos), text, fill = "GREEN",font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
+
+            text = "Disk:"
+            draw.text((LPad, drawpos), text, fill= "YELLOW", font=SmallFont)
+            text = collector.DiskUsage
+            draw.text((LPad + 40, drawpos), text, fill= "GREEN", font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
+
+            text = "Fan:"
+            draw.text((LPad, drawpos), text, fill="YELLOW", font=SmallFont)
+            fan_text = f"CPU {cpu_fan_rpm:4.0f}  AUX {aux_fan_rpm:4.0f}"
+            draw.text((LPad + 40, drawpos), fan_text, fill="GREEN", font=SmallFont)
+            drawpos = drawpos + SmallFontSize + TextPadding
+
+            text = collector.Uptime
             draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
             drawpos = drawpos + SmallFontSize + TextPadding
 
-            wifi_line = collector._WIFI_QUALITY + "%  " + collector._WIFI_RSSI
-            if collector._WIFI_FREQ:
-                wifi_line += "  " + collector._WIFI_FREQ
-            draw.text((LPad, drawpos), wifi_line, fill = RedGreenColorScale(float(collector._WIFI_QUALITY)),font=SmallFont)
+            drawpos = drawpos + DividerHeight
+            draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
+
+            drawpos = drawpos + TextPadding
+            draw.text((LPad, drawpos), "Battery", fill="YELLOW", font=SmallFont)
             drawpos = drawpos + SmallFontSize + TextPadding
 
-        drawpos = drawpos + DividerHeight
-        draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
+            if battery_sample is None:
+                draw.text((LPad, drawpos), "INA219 not detected", fill="RED", font=SmallFont)
+                battery_voltage = 0.0
+                battery_current = 0.0
+                battery_power = 0.0
+                battery_pct = 0.0
+                drawpos = drawpos + SmallFontSize + TextPadding
+            else:
+                battery_voltage = battery_sample["voltage"]
+                battery_current = battery_sample["current"]
+                battery_power = battery_sample["power"]
+                battery_pct = battery_sample["percentage"]
+                current_color = RedGreenColorScale(
+                    abs(battery_current) / 3.0 * 100,
+                    invert=True,
+                )
 
-        drawpos = drawpos + TextPadding
-        text = "CPU:"
-        draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
-        text = collector.CPUUsage + "   " + collector.CPUTemp
-        draw.text((LPad + 40, drawpos), text, fill = "GREEN",font=SmallFont)
-        drawpos = drawpos + SmallFontSize + TextPadding
+                draw.text((LPad, drawpos), f"V: {battery_voltage:5.2f}V", fill="CYAN", font=SmallFont)
+                draw.text((LPad + 116, drawpos), f"I: {battery_current:5.2f}A", fill=current_color, font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
 
-        text = "Mem:"
-        draw.text((LPad, drawpos), text, fill = "YELLOW",font=SmallFont)
-        text = collector.MemUsage
-        draw.text((LPad + 40, drawpos), text, fill = "GREEN",font=SmallFont)
-        drawpos = drawpos + SmallFontSize + TextPadding
-        
-        text = "Disk:"
-        draw.text((LPad, drawpos), text, fill= "YELLOW", font=SmallFont)
-        text = collector.DiskUsage
-        draw.text((LPad + 40, drawpos), text, fill= "GREEN", font=SmallFont)
-        drawpos = drawpos + SmallFontSize + TextPadding
+                draw.text((LPad, drawpos), f"P: {battery_power:5.2f}W", fill="CYAN", font=SmallFont)
+                draw.text((LPad + 116, drawpos), f"SOC: {battery_pct:5.1f}%", fill=SOCColor(battery_pct), font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
 
-        text = "Fan:"
-        draw.text((LPad, drawpos), text, fill="YELLOW", font=SmallFont)
-        fan_text = f"CPU {cpu_fan_rpm:4.0f}  AUX {aux_fan_rpm:4.0f}"
-        draw.text((LPad + 40, drawpos), fan_text, fill="GREEN", font=SmallFont)
-        drawpos = drawpos + SmallFontSize + TextPadding
+            drawpos = drawpos + DividerHeight
+            drawpos = drawpos + DividerHeight
+            draw.line([(0, drawpos), (240, drawpos)], fill=DividerColor, width=DividerHeight)
 
-        text = collector.Uptime
-        draw.text((LPad, drawpos), text, fill = "GREEN",font=SmallFont)
-        drawpos = drawpos + SmallFontSize + TextPadding
-
-        drawpos = drawpos + DividerHeight
-        draw.line([(0, drawpos), (240, drawpos)], fill = DividerColor, width = DividerHeight)
-
-        drawpos = drawpos + TextPadding
-        draw.text((LPad, drawpos), "Battery", fill="YELLOW", font=SmallFont)
-        drawpos = drawpos + SmallFontSize + TextPadding
-
-        if battery_sample is None:
-            draw.text((LPad, drawpos), "INA219 not detected", fill="RED", font=SmallFont)
-            battery_voltage = 0.0
-            battery_current = 0.0
-            battery_power = 0.0
-            battery_pct = 0.0
-            drawpos = drawpos + SmallFontSize + TextPadding
+        elif current_view == 1:
+            # View 1: Full-screen picture (placeholder for now)
+            try:
+                pic_path = os.path.join(os.path.dirname(__file__), "pic", "cyberpunk_bg.png")
+                pic = Image.open(pic_path).convert("RGB")
+                pic = pic.resize((disp.width, disp.height), Image.LANCZOS)
+                image1 = pic
+            except Exception:
+                draw.text((LPad, drawpos), "View 1", fill="WHITE", font=FontBig)
         else:
-            battery_voltage = battery_sample["voltage"]
-            battery_current = battery_sample["current"]
-            battery_power = battery_sample["power"]
-            battery_pct = battery_sample["percentage"]
-            current_color = RedGreenColorScale(
-                abs(battery_current) / 3.0 * 100,
-                invert=True,
-            )
-
-            draw.text((LPad, drawpos), f"V: {battery_voltage:5.2f}V", fill="CYAN", font=SmallFont)
-            draw.text((LPad + 116, drawpos), f"I: {battery_current:5.2f}A", fill=current_color, font=SmallFont)
-            drawpos = drawpos + SmallFontSize + TextPadding
-
-            draw.text((LPad, drawpos), f"P: {battery_power:5.2f}W", fill="CYAN", font=SmallFont)
-            draw.text((LPad + 116, drawpos), f"SOC: {battery_pct:5.1f}%", fill=SOCColor(battery_pct), font=SmallFont)
-            drawpos = drawpos + SmallFontSize + TextPadding
-
-        drawpos = drawpos + DividerHeight
-        drawpos = drawpos + DividerHeight
-        draw.line([(0, drawpos), (240, drawpos)], fill=DividerColor, width=DividerHeight)
+            # Unknown view — draw a placeholder
+            draw.text((LPad, drawpos), f"View {current_view}", fill="WHITE", font=FontBig)
 
         image1=image1.rotate(0)
         if displayed_image is None:

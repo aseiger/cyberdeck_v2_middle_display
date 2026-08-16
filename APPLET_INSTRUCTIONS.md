@@ -2,7 +2,7 @@
 
 ## Overview
 
-Build a small GTK (or GTK-like) system-tray / desktop applet that communicates with the LCD display daemon over a Unix domain socket. The applet provides sliders for main display brightness, SPI LCD backlight brightness, and volume.
+Build a small GTK (or GTK-like) system-tray / desktop applet that communicates with the LCD display daemon over a Unix domain socket. The applet provides sliders for main display brightness, SPI LCD backlight brightness, and volume, plus a button to cycle through screen views.
 
 ## IPC Protocol
 
@@ -30,6 +30,13 @@ Set the **SPI LCD backlight** duty cycle. `value` is a float 0–100. This indep
 Set system audio volume. `value` is a float 0–100. The server passes this through (the display daemon handles the actual volume change via amixer or similar).
 
 ```json
+{"type": "view", "value": 0}
+```
+Switch the LCD to screen view `value`. Currently defined views:
+- **0** — Full dashboard (time, GPS, network, CPU, memory, disk, fan, battery)
+- **1** — Full-screen picture (placeholder, will be replaced later)
+
+```json
 {"type": "get_status"}
 ```
 Request current state from the server.
@@ -37,11 +44,12 @@ Request current state from the server.
 ### Server → Client Response (to `get_status`)
 
 ```json
-{"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0}
+{"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0, "view": 0}
 ```
 - `brightness`: current main display brightness (0–100, or -1 if never set)
 - `lcd_brightness`: current SPI LCD backlight level (0–100, or -1 if never set)
 - `volume`: current volume level (0–100, or -1 if never set)
+- `view`: current active view index
 
 The server also sends an initial `status` response automatically when a new client connects.
 
@@ -65,6 +73,13 @@ The server also sends an initial `status` response automatically when a new clie
 - Sends `{"type": "volume", "value": <slider_value>}\n` on value change
 - On connect, reads `volume` from status and sets slider position
 
+### View Cycle Button
+- A single button (icon or label like "Views" or "📺")
+- Each click increments the view index: 0 → 1 → 0 → 1 ...
+- Sends `{"type": "view", "value": <new_view>}\n` on each click
+- Button label or icon should reflect the current view (e.g. "Dashboard" vs "Picture")
+- On connect, reads `view` from status so the button state is correct
+
 ### Connection Handling
 - Connect to `/tmp/lcdstats.sock` on startup
 - If the socket is unavailable (daemon not running yet), retry every 5 seconds
@@ -74,7 +89,7 @@ The server also sends an initial `status` response automatically when a new clie
 ## Technical Notes
 
 - The server is multi-client — multiple applets can connect simultaneously
-- Messages are fire-and-forget (brightness/lcd_brightness/volume) — no response expected
+- Messages are fire-and-forget (brightness/volume/view) — no response expected
 - Only `get_status` elicits a response
 - The server runs as a systemd service (`lcdstats.service`)
 - Python 3 environment with `.venv` in `/home/alex/DisplayControl/.venv/`
@@ -87,4 +102,5 @@ The server also sends an initial `status` response automatically when a new clie
 
 ## Future Considerations
 
-- More views will be added to the LCD. The socket protocol won't change, so the applet should be designed to accommodate additional controls later.
+- More views will be added (view index > 1). The applet should handle an arbitrary number of views — don't hardcode to just 2. A dynamic approach (query `get_status` after each view switch to confirm the current view) is preferred.
+- The full-screen picture (view 1) will be replaced with something more meaningful later. The socket protocol won't change.
