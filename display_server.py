@@ -73,6 +73,11 @@ class DisplayControlServer:
         with self._lock:
             self._current_view = max(0, view_index)
 
+    def set_lcd_brightness(self, value):
+        """Seed the LCD backlight state (e.g. the daemon's initial hardware value)."""
+        with self._lock:
+            self._lcd_brightness = max(0.0, min(100.0, float(value)))
+
     @property
     def has_brightness(self):
         with self._lock:

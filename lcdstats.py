@@ -255,6 +255,9 @@ try:
     ipc_server = display_server.DisplayControlServer(
         socket_path="/tmp/lcdstats.sock",
     )
+    # Seed the server with the daemon's initial backlight so clients
+    # (e.g. the GTK applet) report the real hardware value on connect.
+    ipc_server.set_lcd_brightness(100)
     ipc_server.start()
     
     case_fan = HardwarePWM(CASE_FAN, frequency=1000)
