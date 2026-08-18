@@ -11,6 +11,11 @@ Client -> Server messages:
   {"type": "lcd_brightness", "value": 75}   # SPI LCD backlight duty cycle 0-100
   {"type": "volume",         "value": 50}   # system volume 0-100
   {"type": "view",           "value": 1}    # switch to screen view N
+  {"type": "fluid", "action": "perturb",
+   "x":0.5, "y":0.7, "strength":600, "radius":40,
+   "fx":0.0, "fy":-1.0, "dye":1.0}            # splash/jet into the fluid (view 1)
+                                              #   strength in px/s (300-900), radius in px (20-80)
+  {"type": "fluid", "action": "reset"}       # reset the fluid (falls from the top)
   {"type": "get_status"}                     # request current state
 
 Server -> Client messages (sent in response to get_status):
@@ -41,6 +46,7 @@ class DisplayControlServer:
         self._lcd_brightness = -1.0  # SPI LCD backlight, -1 means "no value received yet"
         self._volume = -1.0
         self._current_view = 0    # active screen view index
+        self._fluid_events = []   # pending fluid-sim events, drained by the render thread
 
         self._server_sock = None
         self._clients = []        # list of connected client sockets
@@ -77,6 +83,17 @@ class DisplayControlServer:
         """Seed the LCD backlight state (e.g. the daemon's initial hardware value)."""
         with self._lock:
             self._lcd_brightness = max(0.0, min(100.0, float(value)))
+
+    def drain_fluid_events(self):
+        """Pop and return all pending fluid-simulation events (view 1).
+
+        Called by the fluid render thread before each step; returns a list
+        of event dicts (each with an ``action`` key).
+        """
+        with self._lock:
+            events = self._fluid_events
+            self._fluid_events = []
+        return events
 
     @property
     def has_brightness(self):
@@ -221,6 +238,12 @@ class DisplayControlServer:
             with self._lock:
                 self._current_view = max(0, value)
             logger.debug("View -> %d", self._current_view)
+
+        elif msg_type == "fluid":
+            event = {k: v for k, v in msg.items() if k != "type"}
+            with self._lock:
+                self._fluid_events.append(event)
+            logger.debug("Fluid event -> %s", event.get("action"))
 
         elif msg_type == "get_status":
             self._send_status(client)

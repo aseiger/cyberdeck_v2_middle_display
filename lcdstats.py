@@ -22,6 +22,7 @@ import systemStats
 import batteryStats
 import gpsStats
 import display_server
+from pixfluid import PixFluid
 
 def RedGreenColorScale(value : float, invert : bool = False):
     if (value > 100): value = 100
@@ -129,6 +130,11 @@ AUX_FAN_CURVE_FILE = os.path.join(os.path.dirname(__file__), "aux_fan_curve.json
 AUX_FAN_TARGET_RPM_RATIO = 1.0     # aux target RPM = CPU fan RPM * this ratio
 AUX_FAN_SMOOTHING_TIME = 1.0       # exponential smoothing time constant (seconds)
 DISPLAY_POLL_INTERVAL_SECONDS = 0.25
+# View 1 pacing: the work (physics + render + SPI push) is the limiter; no
+# extra sleep is needed. 24 MHz is the fastest rate this panel tolerates on
+# the current wiring (40 MHz corrupts the display).
+FLUID_FRAME_INTERVAL_SECONDS = 0.0
+FLUID_SPI_HZ = 24000000
 logging.basicConfig(level=logging.DEBUG)
 
 case_fan = None
@@ -259,7 +265,14 @@ try:
     # (e.g. the GTK applet) report the real hardware value on connect.
     ipc_server.set_lcd_brightness(100)
     ipc_server.start()
-    
+
+    # View 1: live fluid simulation (Stam stable-fluids, see fluidsim.py).
+    # Stepped in real time while view 1 is active; state persists across
+    # view switches, and applet events (perturb/reset) are applied as they
+    # arrive via the IPC server.
+    fluid = PixFluid(target_size=(disp.width, disp.height))
+    fluid.reset()
+
     case_fan = HardwarePWM(CASE_FAN, frequency=1000)
     case_fan.value = 0.0
 
@@ -352,6 +365,29 @@ try:
 
         # Sync active view
         current_view = ipc_server.current_view
+
+        # Apply fluid events queued by applet clients (perturb / reset)
+        for ev in ipc_server.drain_fluid_events():
+            action = ev.get("action")
+            if action == "reset":
+                fluid.reset()
+            elif action == "perturb":
+                fluid.perturb(
+                    x=float(ev.get("x", 0.5)),
+                    y=float(ev.get("y", 0.5)),
+                    strength=float(ev.get("strength", 500.0)),
+                    radius=float(ev.get("radius", 40.0)),
+                    fx=float(ev.get("fx", 0.0)),
+                    fy=float(ev.get("fy", 0.0)),
+                    dye=float(ev.get("dye", 0.0)),
+                )
+
+        # Full-frame pushes are bandwidth-bound: run the SPI faster in the
+        # fluid view, restore the conservative rate for the dashboard.
+        if disp.SPI is not None:
+            want_speed = FLUID_SPI_HZ if current_view == 1 else disp.SPEED
+            if disp.SPI.max_speed_hz != want_speed:
+                disp.SPI.max_speed_hz = want_speed
 
         image1 = background_image.copy()
         draw = ImageDraw.Draw(image1)
@@ -505,14 +541,13 @@ try:
             draw.line([(0, drawpos), (240, drawpos)], fill=DividerColor, width=DividerHeight)
 
         elif current_view == 1:
-            # View 1: Full-screen picture (placeholder for now)
-            try:
-                pic_path = os.path.join(os.path.dirname(__file__), "pic", "cyberpunk_bg.png")
-                pic = Image.open(pic_path).convert("RGB")
-                pic = pic.resize((disp.width, disp.height), Image.LANCZOS)
-                image1 = pic
-            except Exception:
-                draw.text((LPad, drawpos), "View 1", fill="WHITE", font=FontBig)
+            # View 1: live 2-D pixel fluid (particle sim, Clavet
+            # double-density relaxation).  step() advances by the real
+            # elapsed time in fixed substeps (clamped), so the pour runs
+            # at real speed at any loop rate; the dimmed dashboard
+            # background shows through behind the water.
+            fluid.step(min(dt, 0.1))
+            image1 = fluid.render(background_image)
         else:
             # Unknown view — draw a placeholder
             draw.text((LPad, drawpos), f"View {current_view}", fill="WHITE", font=FontBig)
@@ -521,12 +556,16 @@ try:
         if displayed_image is None:
             disp.ShowImage(image1)
         else:
-            for region in ChangedTileRegions(displayed_image, image1):
+            tile = 32 if current_view == 1 else 16
+            for region in ChangedTileRegions(displayed_image, image1, tile):
                 left, top, right, bottom = region
                 ShowImageRegion(disp, image1.crop(region), left, top)
         displayed_image = image1
         
-        time.sleep(DISPLAY_POLL_INTERVAL_SECONDS)
+        if current_view == 1:
+            time.sleep(FLUID_FRAME_INTERVAL_SECONDS)
+        else:
+            time.sleep(DISPLAY_POLL_INTERVAL_SECONDS)
 
 except IOError as e:
     logging.info(e)    

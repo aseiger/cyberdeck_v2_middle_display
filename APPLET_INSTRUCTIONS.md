@@ -34,7 +34,24 @@ Set system audio volume. `value` is a float 0–100. The server passes this thro
 ```
 Switch the LCD to screen view `value`. Currently defined views:
 - **0** — Full dashboard (time, GPS, network, CPU, memory, disk, fan, battery)
-- **1** — Full-screen picture (placeholder, will be replaced later)
+- **1** — Live fluid simulation (pour/pool, runs in real time)
+
+```json
+{"type": "fluid", "action": "perturb",
+ "x": 0.5, "y": 0.7, "strength": 600, "radius": 40,
+ "fx": 0.0, "fy": -1.0, "dye": 1.0}
+```
+Send a splash/jet into the fluid (view 1). `x`/`y` are normalized
+position (0,0 = top-left). `strength` is the velocity impulse in
+px/s — 300–900 makes a lively splash (default 500). `radius` is the
+blast radius in px, 20–80 (default 40). `fx`/`fy` are the jet
+direction (default `0,0` = radial burst). `dye` (0–1) adds a white
+flash to the splash. All fields except `action` are optional.
+
+```json
+{"type": "fluid", "action": "reset"}
+```
+Reset the fluid so it falls from the top again.
 
 ```json
 {"type": "get_status"}
@@ -103,4 +120,4 @@ The server also sends an initial `status` response automatically when a new clie
 ## Future Considerations
 
 - More views will be added (view index > 1). The applet should handle an arbitrary number of views — don't hardcode to just 2. A dynamic approach (query `get_status` after each view switch to confirm the current view) is preferred.
-- The full-screen picture (view 1) will be replaced with something more meaningful later. The socket protocol won't change.
+- View 1 is a live 2-D particle fluid simulation (see `pixfluid.py`). A natural applet addition is a "poke" button (or touch the screen) that sends a `fluid` perturb message at the tapped location.
