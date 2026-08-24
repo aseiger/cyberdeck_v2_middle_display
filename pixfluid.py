@@ -37,7 +37,12 @@ class PixFluid:
     """Particle fluid with a burst spout, splash API and metaball rendering."""
 
     def __init__(self, target_size=(240, 320),
-                 n_particles=650,
+                 # 400 is the largest pool the pressure model can support
+                 # under gravity: after a burst the pool holds every particle
+                 # ever spawned, and >400 collapses into a flat pancake that
+                 # keeps oscillating (near-pressure vs. gravity) instead of
+                 # settling.  400 settles to rest within ~10 s of a burst.
+                 n_particles=400,
                  h=9.0,
                  gravity=1500.0,
                  k=1500.0,
@@ -53,10 +58,11 @@ class PixFluid:
                  spout_mode='orbit',
                  spout_period=9.0,
                  spout_x=0.45,
-                 spout_y=0.35,
+                 spout_y=0.62,
+                 spout_dip=0.4,
                  spout_halfwidth=6.0,
                  spawn_rate=500.0,
-                 spawn_speed=950.0,
+                 spawn_speed=600.0,
                  start_pool=260,
                  kernel_radius=4.5,
                  deep=(4, 62, 175),
@@ -79,6 +85,11 @@ class PixFluid:
         self.spout_period = max(1.0, float(spout_period))
         self.spout_x = float(spout_x)
         self.spout_y = float(spout_y)
+        # Extra downward component (fraction of jet speed) added to the
+        # left/right spout normals: arcs the jet into the pool instead of a
+        # flat shot that overshoots and slaps the far wall (splash ran up
+        # the opposite edge to the corner).
+        self.spout_dip = float(spout_dip)
         self.spout_halfwidth = float(spout_halfwidth)
         self.spawn_rate = float(spawn_rate)
         self.spawn_speed = float(spawn_speed)
@@ -287,14 +298,16 @@ class PixFluid:
         Returns (sx, sy, nvx, nvy) for 'left', 'right', 'top' or 'orbit'
         (the spout travels the panel perimeter top -> right -> bottom ->
         left, always pouring inward; on the bottom edge it sprays up as a
-        fountain).  Defaults to self.spout_mode.
+        fountain).  The side spouts are dipped slightly downward so the
+        jet arcs down into the pool rather than flying level across the
+        panel.  Defaults to self.spout_mode.
         """
         mode = mode or self.spout_mode
         W, H = self.W, self.H
         if mode == 'left':
-            return (2.0, self.spout_y * H, 1.0, 0.0)
+            return self._dipped_spout(2.0, self.spout_y * H, 1.0, 0.0)
         if mode == 'right':
-            return (W - 2.0, self.spout_y * H, -1.0, 0.0)
+            return self._dipped_spout(W - 2.0, self.spout_y * H, -1.0, 0.0)
         if mode == 'top':
             return (self.spout_x * W, 2.0, 0.0, 1.0)
         P = 2.0 * (W + H)
@@ -309,6 +322,14 @@ class PixFluid:
             return (W - s, H - 2.0, 0.0, -1.0)
         s -= W
         return (2.0, H - s, 1.0, 0.0)          # left edge, moving up
+
+    def _dipped_spout(self, sx, sy, nvx, nvy):
+        """Add the dip-down component to a side-spout normal, renormalize."""
+        if not self.spout_dip:
+            return (sx, sy, nvx, nvy)
+        nvy += self.spout_dip
+        nn = math.hypot(nvx, nvy)
+        return (sx, sy, nvx / nn, nvy / nn)
 
     def _perturb(self, x, y, strength, radius, fx, fy, dye):
         x = min(max(x, 0.0), 1.0) * self.W
