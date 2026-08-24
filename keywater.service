@@ -1,0 +1,14 @@
+[Unit]
+Description=Keywater - keyboard-triggered fluid spout
+After=lcdstats.service
+Wants=lcdstats.service
+
+[Service]
+Type=simple
+ExecStart=/home/alex/DisplayControl/.venv/bin/python /home/alex/DisplayControl/keywater.py
+WorkingDirectory=/home/alex/DisplayControl
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

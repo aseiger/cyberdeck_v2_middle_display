@@ -395,6 +395,11 @@ try:
                     fy=float(ev.get("fy", 0.0)),
                     dye=float(ev.get("dye", 0.0)),
                 )
+            elif action == "burst":
+                fluid.burst(
+                    side=ev.get("side", "left"),
+                    duration=float(ev.get("duration", 0.6)),
+                )
 
         # Full-frame pushes are bandwidth-bound: run the SPI faster in the
         # fluid view, restore the conservative rate for the dashboard.
