@@ -5,19 +5,20 @@ pixfluid.py — fast 2D particle fluid ("pixel water") for the cyberdeck LCD.
 
 Particle-based viscoelastic fluid after Clavet, Beaudoin & Poulin (2005),
 "Particle-based Viscoelastic Fluid Simulation": pairwise viscosity +
-double-density relaxation, fully vectorized in numpy (no scipy).  Water
-pours from a spout at the top edge, falls as a fast stream, splashes into
-the pool, and the oldest particles are recycled back to the spout, so the
-scene runs forever at a fixed particle count.
+double-density relaxation, fully vectorized in numpy (no scipy).  The spout
+fires on demand via burst() (keywater: left/right keyboard halves), arcing
+water into the pool; the oldest particles are recycled back to the spout, so
+the scene runs forever at a fixed particle count.
 
 The public API mirrors FluidSim (fluidsim.py) so lcdstats.py and the IPC
 layer keep working unchanged:
 
     sim = PixFluid(target_size=(240, 320))
-    sim.reset()                 # queue a fresh top pool
+    sim.reset()                 # queue a fresh bottom pool
     sim.step(dt)                # real seconds; fixed substeps inside
     img = sim.render()          # PIL RGB image at target_size
     img = sim.render(bg)        # optionally composite over a background
+    sim.burst(side='left', duration=0.6)  # fire the spout on that side
     sim.perturb(x=0.5, y=0.5, strength=400, radius=0.12,
                 fx=0.0, fy=0.0, dye=0.5)
 
@@ -33,7 +34,7 @@ from PIL import Image
 
 
 class PixFluid:
-    """Particle fluid with a top spout, splash API and metaball rendering."""
+    """Particle fluid with a burst spout, splash API and metaball rendering."""
 
     def __init__(self, target_size=(240, 320),
                  n_particles=650,
@@ -44,11 +45,15 @@ class PixFluid:
                  rho0=0.7,
                  sigma=0.0,
                  beta=0.05,
+                 xsph=0.08,
                  dt_sub=1.0 / 120.0,
                  max_substeps=12,
                  max_speed=700.0,
                  wall_bounce=0.2,
+                 spout_mode='orbit',
+                 spout_period=9.0,
                  spout_x=0.45,
+                 spout_y=0.35,
                  spout_halfwidth=6.0,
                  spawn_rate=500.0,
                  spawn_speed=950.0,
@@ -65,11 +70,15 @@ class PixFluid:
         self.rho0 = float(rho0)
         self.sigma = float(sigma)
         self.beta = float(beta)
+        self.xsph = float(xsph)   # XSPH velocity smoothing (pool settling)
         self.dt_sub = float(dt_sub)
         self.max_substeps = int(max_substeps)
         self.max_speed = float(max_speed)
         self.wall_bounce = float(wall_bounce)
+        self.spout_mode = spout_mode
+        self.spout_period = max(1.0, float(spout_period))
         self.spout_x = float(spout_x)
+        self.spout_y = float(spout_y)
         self.spout_halfwidth = float(spout_halfwidth)
         self.spawn_rate = float(spawn_rate)
         self.spawn_speed = float(spawn_speed)
@@ -91,7 +100,12 @@ class PixFluid:
         self._queue = deque()      # alive slots in spawn order (oldest first)
         self._dead = deque(range(self.n))
         self.flash = np.zeros((self.H, self.W), dtype=np.float32)
+        self._xacc = np.zeros((2, self.n), dtype=np.float32)  # XSPH accumulator
         self._spawn_acc = 0.0
+        self.spout_theta = 0.0     # orbit phase in [0,1): position on perimeter
+        self._sim_t = 0.0                    # accumulated real time (burst windows)
+        self._burst_until = {"left": 0.0, "right": 0.0}  # sim-time expiry per side
+        self._burst_alt = False              # alternate sides when both armed
         self._acc = 0.0
         self._pending = []         # event queue: ("reset",) / ("perturb", args)
 
@@ -124,8 +138,18 @@ class PixFluid:
     # ── public API ────────────────────────────────────────────────────
 
     def reset(self):
-        """Queue a reset: water restarts as a pool at the top of the screen."""
+        """Queue a reset: water restarts as a pool at the bottom of the screen."""
         self._pending.append(("reset",))
+
+    def burst(self, side="left", duration=0.6):
+        """Fire the spout on `side` ('left'/'right') for `duration` seconds.
+
+        Re-arming while active extends the window (holding a key keeps the
+        water flowing).  While no burst is armed the spout stays silent and
+        the pool rests.
+        """
+        side = "left" if str(side) == "left" else "right"
+        self._burst_until[side] = self._sim_t + max(0.0, float(duration))
 
     def perturb(self, x=0.5, y=0.5, strength=400.0, radius=0.12,
                 fx=0.0, fy=0.0, dye=0.0):
@@ -144,6 +168,7 @@ class PixFluid:
     def step(self, dt):
         """Advance the simulation by dt seconds (real time)."""
         dt = min(max(float(dt), 0.0), 0.1)
+        self._sim_t += dt
         self._apply_events()
         self._acc += dt
         n = min(int(self._acc / self.dt_sub), self.max_substeps)
@@ -235,12 +260,14 @@ class PixFluid:
         self.flash[:] = 0.0
         self._spawn_acc = 0.0
         self._acc = 0.0
+        self._burst_until["left"] = 0.0
+        self._burst_until["right"] = 0.0
         self._queue.clear()
         self._dead.clear()
         self.alive[:] = False
         W, H = self.W, self.H
         n0 = min(self.start_pool, self.n)
-        # pool block across the top; spacing ~5.4 px keeps it cohesive
+        # pool block across the bottom; spacing ~5.4 px keeps it cohesive
         spacing = 5.4
         cols = max(1, int((W - 16) / spacing))
         rows = max(1, int(math.ceil(n0 / cols)))
@@ -250,9 +277,38 @@ class PixFluid:
             self.alive[i] = True
             self._queue.append(i)
         x = 8.0 + (np.arange(n0) % cols) * spacing + np.random.uniform(-1, 1, n0)
-        y = 4.0 + (np.arange(n0) // cols) * spacing + np.random.uniform(-0.5, 0.5, n0)
+        y = (H - 4.0) - (np.arange(n0) // cols) * spacing + np.random.uniform(-0.5, 0.5, n0)
         self.pos[:n0, 0] = np.clip(x, 3, W - 3)
         self.pos[:n0, 1] = np.clip(y, 3, H - 3)
+
+    def _spout_state(self, mode=None):
+        """Spout point + inward normal for a spout mode.
+
+        Returns (sx, sy, nvx, nvy) for 'left', 'right', 'top' or 'orbit'
+        (the spout travels the panel perimeter top -> right -> bottom ->
+        left, always pouring inward; on the bottom edge it sprays up as a
+        fountain).  Defaults to self.spout_mode.
+        """
+        mode = mode or self.spout_mode
+        W, H = self.W, self.H
+        if mode == 'left':
+            return (2.0, self.spout_y * H, 1.0, 0.0)
+        if mode == 'right':
+            return (W - 2.0, self.spout_y * H, -1.0, 0.0)
+        if mode == 'top':
+            return (self.spout_x * W, 2.0, 0.0, 1.0)
+        P = 2.0 * (W + H)
+        s = (self.spout_theta * P) % P
+        if s < W:                              # top edge, moving right
+            return (s, 2.0, 0.0, 1.0)
+        s -= W
+        if s < H:                              # right edge, moving down
+            return (W - 2.0, s, -1.0, 0.0)
+        s -= H
+        if s < W:                              # bottom edge, moving left
+            return (W - s, H - 2.0, 0.0, -1.0)
+        s -= W
+        return (2.0, H - s, 1.0, 0.0)          # left edge, moving up
 
     def _perturb(self, x, y, strength, radius, fx, fy, dye):
         x = min(max(x, 0.0), 1.0) * self.W
@@ -354,6 +410,24 @@ class PixFluid:
         # velocity from position change
         vel[a] = (pos[a] - self.prev[a]) / dt
 
+        # XSPH velocity smoothing: each particle's velocity is pulled toward
+        # its neighbors' average, which damps relative motion.  This kills the
+        # micro-jitter that keeps a resting pool "boiling" without affecting
+        # coherent motion (a falling jet moves together, so it barely slows).
+        if self.xsph and pairs is not None:
+            ax = self._xacc[0]
+            ay = self._xacc[1]
+            ax[a] = 0.0
+            ay[a] = 0.0
+            dvx = q * (vel[pj, 0] - vel[pi, 0])
+            dvy = q * (vel[pj, 1] - vel[pi, 1])
+            np.add.at(ax, pi, dvx)
+            np.add.at(ay, pi, dvy)
+            np.add.at(ax, pj, -dvx)
+            np.add.at(ay, pj, -dvy)
+            vel[a, 0] += self.xsph * ax[a]
+            vel[a, 1] += self.xsph * ay[a]
+
         # speed clamp
         sp = np.linalg.norm(vel[a], axis=1)
         m = sp > self.max_speed
@@ -374,24 +448,38 @@ class PixFluid:
         pos[a[m], 1] = self.H - 3.0
         vel[a[m], 1] = -np.abs(vel[a[m], 1]) * self.wall_bounce
 
-        # continuous pour from the spout (recycles the oldest particles)
-        self._spawn_acc += self.spawn_rate * dt
-        n_spawn = int(min(self._spawn_acc, 12))
-        self._spawn_acc -= n_spawn
-        for _ in range(n_spawn):
-            if len(self._dead) > 0:
-                idx = self._dead.popleft()
-                self.alive[idx] = True
-            else:
-                idx = self._queue.popleft()
-            self._queue.append(idx)
-            self.pos[idx, 0] = (self.spout_x * self.W
-                                + np.random.uniform(-self.spout_halfwidth,
-                                                    self.spout_halfwidth))
-            self.pos[idx, 1] = 2.0
-            self.vel[idx, 0] = np.random.uniform(-40.0, 40.0)
-            self.vel[idx, 1] = self.spawn_speed * np.random.uniform(0.85, 1.15)
-            self.prev[idx] = self.pos[idx]
+        # spout fires only while a burst window is armed (keywater / IPC)
+        left_on = self._sim_t < self._burst_until["left"]
+        right_on = self._sim_t < self._burst_until["right"]
+        if left_on or right_on:
+            self.spout_theta = (self.spout_theta + self.dt_sub / self.spout_period) % 1.0
+            self._spawn_acc += self.spawn_rate * dt
+            n_spawn = int(min(self._spawn_acc, 12))
+            self._spawn_acc -= n_spawn
+            if n_spawn:
+                for _ in range(n_spawn):
+                    if left_on and right_on:
+                        self._burst_alt = not self._burst_alt
+                        mode = "right" if self._burst_alt else "left"
+                    else:
+                        mode = "left" if left_on else "right"
+                    sx, sy, nvx, nvy = self._spout_state(mode)
+                    tx, ty = nvy, -nvx       # tangent = direction of travel
+                    if len(self._dead) > 0:
+                        idx = self._dead.popleft()
+                        self.alive[idx] = True
+                    else:
+                        idx = self._queue.popleft()
+                    self._queue.append(idx)
+                    off = np.random.uniform(-self.spout_halfwidth,
+                                            self.spout_halfwidth)
+                    self.pos[idx, 0] = sx + tx * off
+                    self.pos[idx, 1] = sy + ty * off
+                    jet = self.spawn_speed * np.random.uniform(0.85, 1.15)
+                    tang = np.random.uniform(-40.0, 40.0)
+                    self.vel[idx, 0] = nvx * jet + tx * tang
+                    self.vel[idx, 1] = nvy * jet + ty * tang
+                    self.prev[idx] = self.pos[idx]
 
         # flash decay
         self.flash *= 0.87
