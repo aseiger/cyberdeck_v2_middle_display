@@ -404,6 +404,7 @@ try:
                 fluid.spout(
                     side=ev.get("side", "left"),
                     on=bool(ev.get("on", True)),
+                    row=ev.get("row"),
                 )
 
         # Full-frame pushes are bandwidth-bound: run the SPI faster in the

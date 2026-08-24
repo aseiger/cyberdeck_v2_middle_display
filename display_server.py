@@ -19,7 +19,9 @@ Client -> Server messages:
   {"type": "fluid", "action": "burst",
    "side": "left", "duration": 0.6}          # fire the spout on that side for a fixed time
   {"type": "fluid", "action": "spout",
-   "side": "left", "on": true}               # hold the spout on/off while a key is held (keywater)
+   "side": "left", "on": true, "row": 2}      # hold a spout on/off while a key is held (keywater);
+                                              #   row 1-4 = keyboard row -> pour height,
+                                              #   side "center" = space bar (top center)
   {"type": "get_status"}                     # request current state
 
 Server -> Client messages (sent in response to get_status):

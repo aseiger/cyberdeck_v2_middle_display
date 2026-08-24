@@ -5,10 +5,11 @@ pixfluid.py — fast 2D particle fluid ("pixel water") for the cyberdeck LCD.
 
 Particle-based viscoelastic fluid after Clavet, Beaudoin & Poulin (2005),
 "Particle-based Viscoelastic Fluid Simulation": pairwise viscosity +
-double-density relaxation, fully vectorized in numpy (no scipy).  The spout
-fires on demand via burst() (keywater: left/right keyboard halves), arcing
-water into the pool; the oldest particles are recycled back to the spout, so
-the scene runs forever at a fixed particle count.
+double-density relaxation, fully vectorized in numpy (no scipy).  The spouts
+fire on demand via burst()/spout() (keywater: left/right keyboard halves,
+pouring from the height of the key's row; space bar pours from the top
+center), arcing water into the pool; the oldest particles are recycled
+back to the spout, so the scene runs forever at a fixed particle count.
 
 The public API mirrors FluidSim (fluidsim.py) so lcdstats.py and the IPC
 layer keep working unchanged:
@@ -19,7 +20,9 @@ layer keep working unchanged:
     img = sim.render()          # PIL RGB image at target_size
     img = sim.render(bg)        # optionally composite over a background
     sim.burst(side='left', duration=0.6)  # fire the spout on that side
-    sim.spout(side='left', on=True)       # hold the spout while a key is down
+    sim.spout(side='left', on=True, row=3)   # hold a spout while a key is down
+                                             #   (row 1-4 = keyboard row -> height)
+    sim.spout(side='center', on=True)        # space bar: pour from the top center
     sim.perturb(x=0.5, y=0.5, strength=400, radius=0.12,
                 fx=0.0, fy=0.0, dye=0.5)
 
@@ -32,6 +35,13 @@ from collections import deque
 
 import numpy as np
 from PIL import Image
+
+
+# Pour height (fraction of panel height from the top) per keyboard row,
+# 1 = top row ... 4 = bottom row, evenly spaced: the top row pours from the
+# very top of the panel and the lowest row stays at least 20% of the panel
+# height above the bottom.
+SPOUT_ROW_Y = {1: 0.0, 2: 0.8 / 3.0, 3: 1.6 / 3.0, 4: 0.8}
 
 
 class PixFluid:
@@ -59,7 +69,6 @@ class PixFluid:
                  spout_mode='orbit',
                  spout_period=9.0,
                  spout_x=0.45,
-                 spout_y=0.62,
                  spout_dip=0.4,
                  spout_halfwidth=6.0,
                  spawn_rate=500.0,
@@ -85,7 +94,6 @@ class PixFluid:
         self.spout_mode = spout_mode
         self.spout_period = max(1.0, float(spout_period))
         self.spout_x = float(spout_x)
-        self.spout_y = float(spout_y)
         # Extra downward component (fraction of jet speed) added to the
         # left/right spout normals: arcs the jet into the pool instead of a
         # flat shot that overshoots and slaps the far wall (splash ran up
@@ -116,9 +124,9 @@ class PixFluid:
         self._spawn_acc = 0.0
         self.spout_theta = 0.0     # orbit phase in [0,1): position on perimeter
         self._sim_t = 0.0                    # accumulated real time (burst windows)
-        self._burst_until = {"left": 0.0, "right": 0.0}  # sim-time expiry per side
-        self._spout_held = {"left": False, "right": False}  # spout held on (key down)
-        self._burst_alt = False              # alternate sides when both armed
+        self._burst_until = {"left": 0.0, "right": 0.0, "center": 0.0}
+        self._spout_held = {"left": False, "right": False, "center": False}
+        self._spout_row = {"left": 3, "right": 3, "center": 1}  # keyboard row per spout
         self._acc = 0.0
         self._pending = []         # event queue: ("reset",) / ("perturb", args)
 
@@ -164,14 +172,22 @@ class PixFluid:
         side = "left" if str(side) == "left" else "right"
         self._burst_until[side] = self._sim_t + max(0.0, float(duration))
 
-    def spout(self, side="left", on=True, tail=0.15):
-        """Hold the spout on `side` on/off (e.g. while a key is held down).
+    def spout(self, side="left", on=True, row=None, tail=0.15):
+        """Hold a spout on/off (e.g. while a key is held down).
 
+        side: 'left'/'right' side spout, or 'center' (space bar: pours
+              straight down from the top center).
+        row:  keyboard row 1-4 (top to bottom) for side spouts; sets the
+              pour height (evenly spaced, lowest row 20% above the bottom).
         While on, the spout spawns every frame for as long as it is held.
         Turning it off leaves a short tail so the stream tapers instead of
         cutting off mid-droplet.
         """
-        side = "left" if str(side) == "left" else "right"
+        side = str(side)
+        if side not in ("left", "right", "center"):
+            side = "left"
+        if row is not None:
+            self._spout_row[side] = max(1, min(4, int(row)))
         self._spout_held[side] = bool(on)
         if not on:
             self._burst_until[side] = self._sim_t + max(0.0, float(tail))
@@ -285,10 +301,10 @@ class PixFluid:
         self.flash[:] = 0.0
         self._spawn_acc = 0.0
         self._acc = 0.0
-        self._burst_until["left"] = 0.0
-        self._burst_until["right"] = 0.0
-        self._spout_held["left"] = False
-        self._spout_held["right"] = False
+        for s in ("left", "right", "center"):
+            self._burst_until[s] = 0.0
+            self._spout_held[s] = False
+        self._spout_row = {"left": 3, "right": 3, "center": 1}
         self._queue.clear()
         self._dead.clear()
         self.alive[:] = False
@@ -311,19 +327,23 @@ class PixFluid:
     def _spout_state(self, mode=None):
         """Spout point + inward normal for a spout mode.
 
-        Returns (sx, sy, nvx, nvy) for 'left', 'right', 'top' or 'orbit'
-        (the spout travels the panel perimeter top -> right -> bottom ->
-        left, always pouring inward; on the bottom edge it sprays up as a
-        fountain).  The side spouts are dipped slightly downward so the
-        jet arcs down into the pool rather than flying level across the
-        panel.  Defaults to self.spout_mode.
+        Returns (sx, sy, nvx, nvy) for 'left', 'right', 'center', 'top' or
+        'orbit' (the spout travels the panel perimeter top -> right ->
+        bottom -> left, always pouring inward; on the bottom edge it sprays
+        up as a fountain).  The side spouts pour from the height of the
+        currently held keyboard row (SPOUT_ROW_Y) and are dipped slightly
+        downward so the jet arcs down into the pool rather than flying level
+        across the panel.  Defaults to self.spout_mode.
         """
         mode = mode or self.spout_mode
         W, H = self.W, self.H
-        if mode == 'left':
-            return self._dipped_spout(2.0, self.spout_y * H, 1.0, 0.0)
-        if mode == 'right':
-            return self._dipped_spout(W - 2.0, self.spout_y * H, -1.0, 0.0)
+        if mode in ("left", "right"):
+            x = 2.0 if mode == "left" else W - 2.0
+            n = 1.0 if mode == "left" else -1.0
+            y = SPOUT_ROW_Y[self._spout_row[mode]] * H
+            return self._dipped_spout(x, y, n, 0.0)
+        if mode == 'center':
+            return (W / 2.0, 2.0, 0.0, 1.0)
         if mode == 'top':
             return (self.spout_x * W, 2.0, 0.0, 1.0)
         P = 2.0 * (W + H)
@@ -485,23 +505,26 @@ class PixFluid:
         pos[a[m], 1] = self.H - 3.0
         vel[a[m], 1] = -np.abs(vel[a[m], 1]) * self.wall_bounce
 
-        # spout fires while held (key down) or inside a burst window
+        # spouts fire while held (key down) or inside a burst window
         left_on = (self._spout_held["left"]
                    or self._sim_t < self._burst_until["left"])
         right_on = (self._spout_held["right"]
                     or self._sim_t < self._burst_until["right"])
-        if left_on or right_on:
+        center_on = (self._spout_held["center"]
+                     or self._sim_t < self._burst_until["center"])
+        if left_on or right_on or center_on:
+            active = ["left"] if left_on else []
+            if right_on:
+                active.append("right")
+            if center_on:
+                active.append("center")
             self.spout_theta = (self.spout_theta + self.dt_sub / self.spout_period) % 1.0
             self._spawn_acc += self.spawn_rate * dt
             n_spawn = int(min(self._spawn_acc, 12))
             self._spawn_acc -= n_spawn
             if n_spawn:
-                for _ in range(n_spawn):
-                    if left_on and right_on:
-                        self._burst_alt = not self._burst_alt
-                        mode = "right" if self._burst_alt else "left"
-                    else:
-                        mode = "left" if left_on else "right"
+                for i in range(n_spawn):
+                    mode = active[i % len(active)]   # round-robin across active spouts
                     sx, sy, nvx, nvy = self._spout_state(mode)
                     tx, ty = nvy, -nvx       # tangent = direction of travel
                     if len(self._dead) > 0:
