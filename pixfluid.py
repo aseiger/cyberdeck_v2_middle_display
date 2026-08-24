@@ -184,29 +184,37 @@ class PixFluid:
         F = Fp[pad:pad + H, pad:pad + W]
         G = Gp[pad:pad + H, pad:pad + W]
 
-        # color only the visible pixels (water / highlights / flash)
+        # Coverage is a *continuous* alpha (soft edge), not a hard threshold:
+        # the boolean mask used to flip ~1,300 edge pixels in and out every
+        # frame as the water sloshed, which made the whole image's brightness
+        # pulse on and off with each update.  A smooth alpha keeps total
+        # coverage — and hence global brightness — continuous, and
+        # anti-aliases the water edge as a bonus.
         t0 = 0.30
-        show = (F > t0) | (self.flash > 0.03) | ((G > 0.5) & (F > 0.12))
-        out = np.empty((H, W, 3), dtype=np.uint8)
-        out[...] = (4, 6, 14)
-        if show.any():
-            fs = F[show]
-            gs = G[show]
-            depth = np.clip((fs - t0) / 1.3, 0.0, 1.0)
-            c = (self.surface[None, :] * (1.0 - depth)[:, None]
-                 + self.deep[None, :] * depth[:, None]).astype(np.float32)
-            m_speed = np.clip((gs - 0.5) / 0.5, 0.0, 1.0) * 0.6
-            m_flash = np.clip(self.flash[show], 0.0, 1.0) * 0.85
-            m = np.clip(np.maximum(m_speed, m_flash), 0.0, 1.0)
-            c = c * (1.0 - m[:, None]) + 255.0 * m[:, None]
-            out[show] = c.astype(np.uint8)
+        tspan = 0.18          # alpha ramp width above the t0 threshold
+        alpha = np.clip((F - t0) / tspan, 0.0, 1.0)
+        alpha = np.maximum(alpha, np.clip((self.flash - 0.03) / 0.25, 0.0, 1.0))
+        alpha = np.maximum(
+            alpha,
+            np.clip((G - 0.5) / 0.5, 0.0, 1.0) * np.clip((F - 0.12) / 0.18, 0.0, 1.0),
+        )
+
+        depth = np.clip((F - t0) / 1.3, 0.0, 1.0)
+        c = (self.surface[None, :] * (1.0 - depth)[..., None]
+             + self.deep[None, :] * depth[..., None]).astype(np.float32)
+        m_speed = np.clip((G - 0.5) / 0.5, 0.0, 1.0) * 0.6
+        m_flash = np.clip(self.flash, 0.0, 1.0) * 0.85
+        m = np.clip(np.maximum(m_speed, m_flash), 0.0, 1.0)
+        c = c * (1.0 - m)[..., None] + 255.0 * m[..., None]
 
         if background is not None:
-            base = np.asarray(background.convert("RGB"), dtype=np.uint8)
-            if base.shape == out.shape:
-                return Image.fromarray(
-                    np.where(show[..., None], out, base), "RGB")
-        return Image.fromarray(out, "RGB")
+            base = np.asarray(background.convert("RGB"), dtype=np.float32)
+            if base.shape == c.shape:
+                out = alpha[..., None] * c + (1.0 - alpha)[..., None] * base
+                return Image.fromarray(np.rint(out).astype(np.uint8), "RGB")
+        out = (alpha[..., None] * c
+               + (1.0 - alpha)[..., None] * np.array((4, 6, 14), np.float32))
+        return Image.fromarray(np.rint(out).astype(np.uint8), "RGB")
 
     # ── event queue ───────────────────────────────────────────────────
 

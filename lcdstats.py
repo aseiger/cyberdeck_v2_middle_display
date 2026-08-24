@@ -131,10 +131,13 @@ AUX_FAN_TARGET_RPM_RATIO = 1.0     # aux target RPM = CPU fan RPM * this ratio
 AUX_FAN_SMOOTHING_TIME = 1.0       # exponential smoothing time constant (seconds)
 DISPLAY_POLL_INTERVAL_SECONDS = 0.25
 # View 1 pacing: the work (physics + render + SPI push) is the limiter; no
-# extra sleep is needed. 24 MHz is the fastest rate this panel tolerates on
-# the current wiring (40 MHz corrupts the display).
+# extra sleep is needed.
 FLUID_FRAME_INTERVAL_SECONDS = 0.0
-FLUID_SPI_HZ = 24000000
+FLUID_SPI_HZ = 28000000  # fluid-view ceiling: 28 MHz renders, 30 MHz corrupts (white).
+# NOTE: the per-update brightness pulse is NOT a rate problem — it's the 5V
+# backlight sagging under SPI load (proven: frozen gray flickers, frozen black
+# stays solid). Higher rate only shortens the dip; decouple backlight power to
+# kill it. 28 MHz is the highest rate that doesn't corrupt the panel.
 logging.basicConfig(level=logging.DEBUG)
 
 case_fan = None
@@ -190,7 +193,16 @@ def cleanup_and_exit(signum=None, frame=None):
             disp = None
 
     if signum is not None:
-        raise SystemExit(0)
+        # Terminate decisively with os._exit() rather than raising SystemExit.
+        # Raising SystemExit can hang the shutdown: the main loop runs on the main
+        # thread and periodically blocks in subprocess.check_output ("mpstat 1 1",
+        # "vcgencmd measure_temp") -> os.waitpid. When SIGTERM lands while the main
+        # thread is parked in that C-level wait, the SystemExit cannot unwind out of
+        # it, so the process sits alive past systemd's stop timeout and gets SIGKILLed.
+        # Hardware cleanup (module_exit, servers, collectors) is already complete
+        # above, so it is safe to end the process immediately.
+        logging.info("[SHUTDOWN] cleanup complete, exiting")
+        os._exit(0)
 
 
 atexit.register(cleanup_and_exit)
@@ -239,7 +251,9 @@ def _rpm_to_duty(target_rpm, curve):
 try:
     # display with hardware SPI:
     ''' Warning!!!Don't  creation of multiple displayer objects!!! '''
-    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=15000000,rst=RST,dc=DC,bl=BL)
+    # bl_freq=5000: run the backlight on 5 kHz hardware PWM — well above the
+    # perceptible-flicker range (1 kHz was the previous default).
+    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=15000000,rst=RST,dc=DC,bl=BL,bl_freq=5000)
     # disp = LCD_2inch4.LCD_2inch4()
     # Initialize library.
     disp.Init()
