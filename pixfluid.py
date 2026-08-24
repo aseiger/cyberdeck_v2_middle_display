@@ -19,6 +19,7 @@ layer keep working unchanged:
     img = sim.render()          # PIL RGB image at target_size
     img = sim.render(bg)        # optionally composite over a background
     sim.burst(side='left', duration=0.6)  # fire the spout on that side
+    sim.spout(side='left', on=True)       # hold the spout while a key is down
     sim.perturb(x=0.5, y=0.5, strength=400, radius=0.12,
                 fx=0.0, fy=0.0, dye=0.5)
 
@@ -116,6 +117,7 @@ class PixFluid:
         self.spout_theta = 0.0     # orbit phase in [0,1): position on perimeter
         self._sim_t = 0.0                    # accumulated real time (burst windows)
         self._burst_until = {"left": 0.0, "right": 0.0}  # sim-time expiry per side
+        self._spout_held = {"left": False, "right": False}  # spout held on (key down)
         self._burst_alt = False              # alternate sides when both armed
         self._acc = 0.0
         self._pending = []         # event queue: ("reset",) / ("perturb", args)
@@ -161,6 +163,18 @@ class PixFluid:
         """
         side = "left" if str(side) == "left" else "right"
         self._burst_until[side] = self._sim_t + max(0.0, float(duration))
+
+    def spout(self, side="left", on=True, tail=0.15):
+        """Hold the spout on `side` on/off (e.g. while a key is held down).
+
+        While on, the spout spawns every frame for as long as it is held.
+        Turning it off leaves a short tail so the stream tapers instead of
+        cutting off mid-droplet.
+        """
+        side = "left" if str(side) == "left" else "right"
+        self._spout_held[side] = bool(on)
+        if not on:
+            self._burst_until[side] = self._sim_t + max(0.0, float(tail))
 
     def perturb(self, x=0.5, y=0.5, strength=400.0, radius=0.12,
                 fx=0.0, fy=0.0, dye=0.0):
@@ -273,6 +287,8 @@ class PixFluid:
         self._acc = 0.0
         self._burst_until["left"] = 0.0
         self._burst_until["right"] = 0.0
+        self._spout_held["left"] = False
+        self._spout_held["right"] = False
         self._queue.clear()
         self._dead.clear()
         self.alive[:] = False
@@ -469,9 +485,11 @@ class PixFluid:
         pos[a[m], 1] = self.H - 3.0
         vel[a[m], 1] = -np.abs(vel[a[m], 1]) * self.wall_bounce
 
-        # spout fires only while a burst window is armed (keywater / IPC)
-        left_on = self._sim_t < self._burst_until["left"]
-        right_on = self._sim_t < self._burst_until["right"]
+        # spout fires while held (key down) or inside a burst window
+        left_on = (self._spout_held["left"]
+                   or self._sim_t < self._burst_until["left"])
+        right_on = (self._spout_held["right"]
+                    or self._sim_t < self._burst_until["right"])
         if left_on or right_on:
             self.spout_theta = (self.spout_theta + self.dt_sub / self.spout_period) % 1.0
             self._spawn_acc += self.spawn_rate * dt

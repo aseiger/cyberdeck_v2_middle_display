@@ -17,7 +17,9 @@ Client -> Server messages:
                                               #   strength in px/s (300-900), radius in px (20-80)
   {"type": "fluid", "action": "reset"}       # reset the fluid (reforms as a pool)
   {"type": "fluid", "action": "burst",
-   "side": "left", "duration": 0.6}          # fire the spout on that side (keywater)
+   "side": "left", "duration": 0.6}          # fire the spout on that side for a fixed time
+  {"type": "fluid", "action": "spout",
+   "side": "left", "on": true}               # hold the spout on/off while a key is held (keywater)
   {"type": "get_status"}                     # request current state
 
 Server -> Client messages (sent in response to get_status):

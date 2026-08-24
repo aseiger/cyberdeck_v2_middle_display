@@ -400,6 +400,11 @@ try:
                     side=ev.get("side", "left"),
                     duration=float(ev.get("duration", 0.6)),
                 )
+            elif action == "spout":
+                fluid.spout(
+                    side=ev.get("side", "left"),
+                    on=bool(ev.get("on", True)),
+                )
 
         # Full-frame pushes are bandwidth-bound: run the SPI faster in the
         # fluid view, restore the conservative rate for the dashboard.

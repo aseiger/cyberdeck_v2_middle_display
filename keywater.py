@@ -5,11 +5,11 @@ keywater.py — cyberdeck keyboard -> fluid spout trigger.
 
 Watches every /dev/input/event* device for key presses and maps each key to
 a hand side (left / right) by its home position on a standard QWERTY layout.
-Every press (and auto-repeat) sends a "burst" fluid event to the lcdstats
-IPC socket, so the water spout on that side fires:
+Key down holds the spout on for that side; key up turns it off, so the
+spout lasts exactly as long as the key is pressed:
 
-    left half of the keyboard  ->  spout on the left edge
-    right half of the keyboard ->  spout on the right edge
+    left half of the keyboard  ->  spout held on the left edge
+    right half of the keyboard ->  spout held on the right edge
 
 Run as the `keywater` systemd service, or directly:
 
@@ -103,9 +103,10 @@ def open_devices(fds):
     return added
 
 
-def send_burst(side):
-    """Send a burst fluid event to the lcdstats IPC socket (best effort)."""
-    msg = (json.dumps({"type": "fluid", "action": "burst", "side": side})
+def send_spout(side, on):
+    """Hold the side spout on/off via the lcdstats IPC socket (best effort)."""
+    msg = (json.dumps({"type": "fluid", "action": "spout",
+                       "side": side, "on": bool(on)})
            + "\n").encode("utf-8")
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -158,15 +159,22 @@ def main():
             for i in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
                 _sec, _usec, etype, code, value = struct.unpack_from(
                     EVENT_FMT, data, i)
-                if etype != EV_KEY or value not in (KEY_PRESS, KEY_REPEAT):
+                if etype != EV_KEY:
                     continue
                 side = classify(code)
                 if side is None:
                     continue
-                if dry:
-                    print(f"{device}: {code} -> {side}", flush=True)
-                else:
-                    send_burst(side)
+                if value == KEY_PRESS:          # key down -> spout on
+                    if dry:
+                        print(f"{device}: {code} down -> {side}", flush=True)
+                    else:
+                        send_spout(side, True)
+                elif value == KEY_RELEASE:      # key up -> spout off
+                    if dry:
+                        print(f"{device}: {code} up -> {side}", flush=True)
+                    else:
+                        send_spout(side, False)
+                # KEY_REPEAT: key already down, spout already held on
 
 
 if __name__ == "__main__":
