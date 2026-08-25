@@ -14,7 +14,13 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# lib/ is the Waveshare LCD driver library. The template's blanket `lib/`
+# ignore was accidentally hiding the whole driver package (and our reset fix)
+# from git. Ignore the unused drivers, but track the 3 files the app needs.
+lib/*
+!lib/__init__.py
+!lib/lcdconfig.py
+!lib/LCD_2inch4.py
 lib64/
 parts/
 sdist/

@@ -134,6 +134,9 @@ DISPLAY_POLL_INTERVAL_SECONDS = 0.25
 # extra sleep is needed.
 FLUID_FRAME_INTERVAL_SECONDS = 0.0
 FLUID_SPI_HZ = 28000000  # fluid-view ceiling: 28 MHz renders, 30 MHz corrupts (white).
+# 28 MHz = fastest confirmed-rendering speed = brightest (shorter SPI bursts
+# = less sustained 5V backlight sag = less dimming/flicker). If you ever see a
+# white flash at this rate, that's the ~30 MHz signal cliff — drop to 24.
 # NOTE: the per-update brightness pulse is NOT a rate problem — it's the 5V
 # backlight sagging under SPI load (proven: frozen gray flickers, frozen black
 # stays solid). Higher rate only shortens the dip; decouple backlight power to
@@ -253,14 +256,27 @@ try:
     ''' Warning!!!Don't  creation of multiple displayer objects!!! '''
     # bl_freq=5000: run the backlight on 5 kHz hardware PWM — well above the
     # perceptible-flicker range (1 kHz was the previous default).
-    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=15000000,rst=RST,dc=DC,bl=BL,bl_freq=5000)
+    # 28 MHz base: fastest confirmed-rendering speed = brightest (shorter SPI
+    # bursts = less sustained 5V backlight sag). Stays under the ~30 MHz signal
+    # cliff. The permanent fix for dimming is still power decoupling on the LCD
+    # 5V rail, but 28 MHz is the brightest the software side can get.
+    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=28000000,rst=RST,dc=DC,bl=BL,bl_freq=5000)
     # disp = LCD_2inch4.LCD_2inch4()
+    # Brief settle before we drive the reset line (safety net; the real
+    # blank-on-restart fix is the corrected ST7789 reset settle time in
+    # LCD_2inch4.reset()).
+    time.sleep(1.5)
     # Initialize library.
     disp.Init()
-    # Clear display.
-    disp.clear()
-    #Set the backlight to 100
-    disp.bl_DutyCycle(100)
+    # Baseline the panel to BLACK (not white) so there's no white content in
+    # GRAM before the first frame. Backlight is still OFF here so it's
+    # invisible — but if any tearing/frame-delay shows old content when the
+    # backlight first lights, it'll be black (matches the dark theme) instead
+    # of a white patch.
+    disp.clear_color(0x0000)
+    # Backlight is deliberately left OFF here. It's only switched on once the
+    # first real frame has been drawn in the main loop below, so the panel
+    # stays fully black through init and the user never sees the white flash.
     last_lcd_brightness = -1.0
 
     background_path = os.path.join(os.path.dirname(__file__), "pic", "cyberpunk_bg.png")
@@ -372,10 +388,13 @@ try:
             last_aux_duty = new_duty
 
 
-        # Sync SPI LCD backlight with the dedicated lcd_brightness value
-        if ipc_server.has_lcd_brightness and ipc_server.lcd_brightness != last_lcd_brightness:
+        # Sync SPI LCD backlight with the dedicated lcd_brightness value.
+        # Gated on "at least one frame drawn" (displayed_image is not None) so
+        # the panel is never lit before it has real content. From the second
+        # iteration on this is the live path for applet brightness changes.
+        if displayed_image is not None and ipc_server.has_lcd_brightness and ipc_server.lcd_brightness != last_lcd_brightness:
             disp.bl_DutyCycle(ipc_server.lcd_brightness)
-        last_lcd_brightness = ipc_server.lcd_brightness
+            last_lcd_brightness = ipc_server.lcd_brightness
 
         # Sync active view
         current_view = ipc_server.current_view
@@ -579,7 +598,21 @@ try:
 
         image1=image1.rotate(0)
         if displayed_image is None:
+            # First full frame. (An earlier version re-pushed this same frame
+            # once more ~1s later as a band-aid for the blank-on-restart bug.
+            # The real fix is the ST7789 reset settle time in
+            # LCD_2inch4.reset(), so the first frame now lands correctly on its
+            # own — and dropping the redundant full-screen rewrite also removes
+            # the one-frame flicker it used to cause.)
             disp.ShowImage(image1)
+            # Give the panel a beat to finish displaying the first frame before
+            # we light the backlight, so no partial/old content shows through.
+            time.sleep(0.25)
+            # First real frame is on the panel — safe to light the backlight.
+            # (It was held off during init so the user never sees the flash.)
+            if ipc_server.has_lcd_brightness:
+                disp.bl_DutyCycle(ipc_server.lcd_brightness)
+                last_lcd_brightness = ipc_server.lcd_brightness
         else:
             tile = 32 if current_view == 1 else 16
             for region in ChangedTileRegions(displayed_image, image1, tile):
