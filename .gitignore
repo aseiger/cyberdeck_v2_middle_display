@@ -207,3 +207,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Local openhop API key for the repeater view (use REPEATER_API_KEY env var
+# in production; this file is a dev-only fallback and must never be committed)
+repeater_api_key

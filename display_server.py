@@ -10,7 +10,7 @@ Client -> Server messages:
   {"type": "brightness",     "value": 75}   # main display brightness 0-100
   {"type": "lcd_brightness", "value": 75}   # SPI LCD backlight duty cycle 0-100
   {"type": "volume",         "value": 50}   # system volume 0-100
-  {"type": "view",           "value": 1}    # switch to screen view N
+  {"type": "view",           "value": 1}    # switch to screen view N (0=dashboard, 1=fluid, 2=repeater)
   {"type": "fluid", "action": "perturb",
    "x":0.5, "y":0.7, "strength":600, "radius":40,
    "fx":0.0, "fy":-1.0, "dye":1.0}            # splash/jet into the fluid (view 1)
@@ -25,7 +25,14 @@ Client -> Server messages:
   {"type": "get_status"}                     # request current state
 
 Server -> Client messages (sent in response to get_status):
-  {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50, "view": 0}
+  {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50,
+   "view": 0, "views": ["Dashboard", "Fluid", "Repeater"]}
+
+The server is the source of truth for the available screens: VIEWS below is
+the single registry of screen names (position in the list == view index). It
+is advertised to every client in the `views` field of each status message, so
+clients never hardcode their own screen lists. New screens are added here
+(and given a render branch in lcdstats.py).
 """
 
 import json
@@ -35,7 +42,16 @@ import select
 import socket
 import threading
 
+# Canonical list of LCD screens. The position is the view index used by the
+# "view" client messages and the `view` field of status responses.
+VIEWS = [
+    "Dashboard",  # 0: full dashboard (time, GPS, network, CPU, fan, battery)
+    "Fluid",      # 1: live pixel fluid simulation
+    "Repeater",   # 2: openhop repeater status + packet feed
+]
+
 SOCKET_PATH = "/tmp/lcdstats.sock"
+
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +97,16 @@ class DisplayControlServer:
         with self._lock:
             return self._current_view
 
+    @property
+    def view_count(self):
+        """Number of registered screens (len of the VIEWS registry)."""
+        return len(VIEWS)
+
     def set_view(self, view_index):
+        # Clamp to the registered screen range — VIEWS is the source of truth,
+        # so clients can never select a screen that does not exist.
         with self._lock:
-            self._current_view = max(0, view_index)
+            self._current_view = max(0, min(int(view_index), len(VIEWS) - 1))
 
     def set_lcd_brightness(self, value):
         """Seed the LCD backlight state (e.g. the daemon's initial hardware value)."""
@@ -200,7 +223,15 @@ class DisplayControlServer:
                         # Process complete lines
                         while b"\n" in buffers[sock]:
                             line, buffers[sock] = buffers[sock].split(b"\n", 1)
-                            self._handle_message(sock, line.decode("utf-8", errors="replace"))
+                            try:
+                                self._handle_message(sock, line.decode("utf-8", errors="replace"))
+                            except Exception:
+                                # Never let one bad message kill the server
+                                # thread (bad types, unexpected shapes) — log and keep serving.
+                                logger.warning(
+                                    "Error handling message from client: %r",
+                                    line[:200], exc_info=True,
+                                )
                     except (OSError, ConnectionResetError):
                         logger.info("Client disconnected")
                         self._clients.remove(sock)
@@ -240,10 +271,11 @@ class DisplayControlServer:
             logger.debug("Volume -> %.1f", self._volume)
 
         elif msg_type == "view":
-            value = int(msg.get("value", 0))
-            with self._lock:
-                self._current_view = max(0, value)
-            logger.debug("View -> %d", self._current_view)
+            # Clamp through set_view(): the VIEWS registry is the source of
+            # truth, so out-of-range values land on the nearest valid screen.
+            value = int(float(msg.get("value", 0)))
+            self.set_view(value)
+            logger.debug("View -> %d", self.current_view)
 
         elif msg_type == "fluid":
             event = {k: v for k, v in msg.items() if k != "type"}
@@ -265,6 +297,8 @@ class DisplayControlServer:
                 "lcd_brightness": round(self._lcd_brightness, 1),
                 "volume": round(self._volume, 1),
                 "view": self._current_view,
+                # Advertised screen registry: position == view index.
+                "views": list(VIEWS),
             }) + "\n"
 
     def _send_status(self, client):

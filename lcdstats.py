@@ -21,6 +21,7 @@ import json
 import systemStats
 import batteryStats
 import gpsStats
+import repeaterStats
 import display_server
 from pixfluid import PixFluid
 
@@ -40,6 +41,30 @@ def SOCColor(pct: float):
         return "GREEN"
     ratio = max(0.0, pct) / 25.0
     return (int(255 * (1.0 - ratio)), int(255 * ratio), 0)
+
+
+def FormatUptime(seconds: float):
+    """Compact d/h/m uptime string for the repeater view."""
+    seconds = int(max(0, seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+def PacketAge(seconds: float):
+    """Compact 'how long ago' string for the repeater packet feed."""
+    seconds = int(max(0, seconds))
+    if seconds < 5:
+        return "now"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
 
 
 def ChangedTileRegions(previous_image, current_image, tile_size=16):
@@ -147,12 +172,13 @@ case_fan = None
 fan_tach = None
 ipc_server = None
 gps_collector = None
+repeater_collector = None
 disp = None
 
 
 def cleanup_and_exit(signum=None, frame=None):
     """Force peripherals to a safe state during service stop/shutdown."""
-    global case_fan, fan_tach, ipc_server, gps_collector, disp
+    global case_fan, fan_tach, ipc_server, gps_collector, repeater_collector, disp
 
     if case_fan is not None:
         try:
@@ -186,6 +212,14 @@ def cleanup_and_exit(signum=None, frame=None):
             pass
         finally:
             gps_collector = None
+
+    if repeater_collector is not None:
+        try:
+            repeater_collector.stop()
+        except Exception:
+            pass
+        finally:
+            repeater_collector = None
 
     if disp is not None:
         try:
@@ -310,6 +344,8 @@ try:
     
     collector = systemStats.SystemStatisticsCollector()
     gps_collector = gpsStats.GPSStatisticsCollector()
+    # View 2: openhop-repeater status (polls http://127.0.0.1:8000/api/stats).
+    repeater_collector = repeaterStats.RepeaterStatisticsCollector()
     battery_collector = None
     next_battery_init_attempt = 0.0
     fan_tach = FanTachometer(FAN_TACH, pulses_per_rev=AUX_FAN_PULSES_PER_REV)
@@ -592,6 +628,119 @@ try:
             # background shows through behind the water.
             fluid.step(min(dt, 0.1))
             image1 = fluid.render(background_image)
+
+        elif current_view == 2:
+            # View 2: openhop-repeater live status (polls /api/stats and
+            # /api/recent_packets on a background thread — see repeaterStats.py).
+            # Green dot = service up, yellow = radio degraded, red = down/disabled.
+            draw.text((LPad, drawpos), "MC Repeater", fill="WHITE", font=FontBig)
+
+            if repeater_collector.Connected:
+                _radio_status = repeater_collector.RadioStatus
+                if _radio_status == "degraded":
+                    status_color = "YELLOW"
+                elif _radio_status == "disabled":
+                    status_color = "RED"
+                else:
+                    status_color = "GREEN"
+            else:
+                status_color = "RED"
+            dot_x = disp.width - LPad - 10
+            dot_y = drawpos + (FontBigSize - 8) // 2
+            draw.ellipse([dot_x, dot_y, dot_x + 8, dot_y + 8], fill=status_color)
+
+            drawpos = drawpos + FontBigSize + TextPadding
+            drawpos = drawpos + DividerHeight
+            draw.line([(0, drawpos), (240, drawpos)], fill=DividerColor, width=DividerHeight)
+
+            if not repeater_collector.Connected:
+                # Service down — the collector keeps retrying in the background.
+                if repeater_collector.AuthFailed:
+                    draw.text((LPad, drawpos + 80), "AUTH FAILED", fill="RED", font=Font)
+                    draw.text((LPad, drawpos + 115), "no valid API token",
+                              fill="YELLOW", font=TinyFont)
+                    draw.text((LPad, drawpos + 132), "set REPEATER_API_KEY env or file",
+                              fill="CYAN", font=TinyFont)
+                else:
+                    draw.text((LPad, drawpos + 80), "SERVICE DOWN", fill="RED", font=Font)
+                    draw.text((LPad, drawpos + 115),
+                              f"polling http://127.0.0.1:{repeaterStats.REPEATER_API_PORT}",
+                              fill="YELLOW", font=TinyFont)
+            else:
+                # Node name + local hash (one line; the LCD clips past x=240)
+                node_name = repeater_collector.NodeName[:18] or "?"
+                local_hash = repeater_collector.LocalHash
+                if local_hash:
+                    draw.text((LPad, drawpos), f"{node_name}  #{local_hash[:16]}",
+                              fill="GREEN", font=SmallFont)
+                else:
+                    draw.text((LPad, drawpos), node_name, fill="GREEN", font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
+
+                # RX / TX totals with rolling per-hour rates (one line)
+                rx_text = f"RX {repeater_collector.RxCount} (+{int(repeater_collector.RxPerHour)}/h)"
+                tx_text = f"TX {repeater_collector.TxCount}"
+                draw.text((LPad, drawpos), rx_text[:20], fill="GREEN", font=SmallFont)
+                draw.text((LPad + 130, drawpos), tx_text[:14], fill="CYAN", font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
+
+                # Mode / noise floor / airtime (one line)
+                mode = repeater_collector.Mode
+                mode_color = {"forward": "GREEN", "monitor": "YELLOW"}.get(mode, "RED")
+                noise_floor = repeater_collector.NoiseFloorDbm
+                nf_text = "--" if noise_floor is None else f"{noise_floor:.0f}dBm"
+                airtime_pct = repeater_collector.AirtimeUtilizationPct
+                draw.text((LPad, drawpos), mode or "?", fill=mode_color, font=SmallFont)
+                draw.text((LPad + 78, drawpos), nf_text, fill="CYAN", font=SmallFont)
+                draw.text((LPad + 150, drawpos), f"{airtime_pct:.0f}%",
+                          fill=RedGreenColorScale(airtime_pct), font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
+
+                # --- Live packet feed (the main event) -------------------
+                drawpos = drawpos + DividerHeight
+                draw.line([(0, drawpos), (240, drawpos)], fill=DividerColor, width=DividerHeight)
+
+                packets = repeater_collector.RecentPackets
+                now_ts = time.time()
+
+                # Recent adverts: count in the last 10 min + newest one's src.
+                recent_adverts = [p for p in packets
+                                  if p["type_name"] == "ADVERT"
+                                  and (now_ts - p["timestamp"]) <= 600]
+                if recent_adverts:
+                    newest_adv = recent_adverts[0]
+                    adv_text = f"{len(recent_adverts)} last 10m, {newest_adv['src_hash']}→{newest_adv['dst_hash']}"
+                else:
+                    adv_text = "none in last 10m"
+                draw.text((LPad, drawpos), "Advert:", fill="YELLOW", font=SmallFont)
+                draw.text((LPad + 56, drawpos), adv_text[:24], fill="GREEN", font=SmallFont)
+                drawpos = drawpos + SmallFontSize + TextPadding
+
+                # Newest-first feed: src→dst TYPE ROUTE rssi age. Dropped
+                # packets show DROP in red; duplicates are dimmed grey.
+                for p in packets[:8]:
+                    if p["drop_reason"]:
+                        tail = "DROP"
+                    elif p["rssi"] is not None:
+                        tail = f"{p['rssi']}dBm"
+                    else:
+                        tail = ""
+                    line = f"{p['src_hash']}→{p['dst_hash']} {p['type_name']} {p['route_name']}"
+                    if tail:
+                        line += f" {tail}"
+                    line += f" {PacketAge(now_ts - p['timestamp'])}"
+                    if p["drop_reason"]:
+                        color = "RED"
+                    elif p["is_duplicate"]:
+                        color = (120, 120, 120)
+                    else:
+                        color = "GREEN"
+                    draw.text((LPad, drawpos), line[:34], fill=color, font=TinyFont)
+                    drawpos = drawpos + TinyFontSize + TextPadding
+
+                if not packets:
+                    draw.text((LPad, drawpos), "no packets yet", fill="CYAN", font=TinyFont)
+
         else:
             # Unknown view — draw a placeholder
             draw.text((LPad, drawpos), f"View {current_view}", fill="WHITE", font=FontBig)

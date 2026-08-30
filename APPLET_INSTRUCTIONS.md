@@ -32,9 +32,14 @@ Set system audio volume. `value` is a float 0–100. The server passes this thro
 ```json
 {"type": "view", "value": 0}
 ```
-Switch the LCD to screen view `value`. Currently defined views:
+Switch the LCD to screen view `value`. The server is the source of truth for
+the available screens: each status message advertises them in the `views`
+field (array of names, position == index). Currently defined views:
 - **0** — Full dashboard (time, GPS, network, CPU, memory, disk, fan, battery)
 - **1** — Live fluid simulation (pour/pool, runs in real time)
+- **2** — openhop repeater status + live packet feed
+
+View values outside the registered range are clamped to the nearest valid one.
 
 ```json
 {"type": "fluid", "action": "perturb",
@@ -61,12 +66,16 @@ Request current state from the server.
 ### Server → Client Response (to `get_status`)
 
 ```json
-{"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0, "view": 0}
+{"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0,
+ "view": 0, "views": ["Dashboard", "Fluid", "Repeater"]}
 ```
 - `brightness`: current main display brightness (0–100, or -1 if never set)
 - `lcd_brightness`: current SPI LCD backlight level (0–100, or -1 if never set)
 - `volume`: current volume level (0–100, or -1 if never set)
 - `view`: current active view index
+- `views`: the daemon's screen registry — a JSON array of name strings in
+  view-index order. The server is the source of truth for screens and their
+  names; do not hardcode your own list. New screens appear here automatically.
 
 The server also sends an initial `status` response automatically when a new client connects.
 
@@ -92,10 +101,11 @@ The server also sends an initial `status` response automatically when a new clie
 
 ### View Cycle Button
 - A single button (icon or label like "Views" or "📺")
-- Each click increments the view index: 0 → 1 → 0 → 1 ...
+- Each click advances to the next view, wrapping around the **server-reported** screen list (`views`): 0 → 1 → … → N-1 → 0 ...
 - Sends `{"type": "view", "value": <new_view>}\n` on each click
-- Button label or icon should reflect the current view (e.g. "Dashboard" vs "Picture")
-- On connect, reads `view` from status so the button state is correct
+- After **each** cycle click, re-request `get_status` and refresh the available-screens list (count + names) — the server is the source of truth, so newly added screens show up without restarting the applet
+- Button label should use the screen name from the daemon's registry for the current view (e.g. "Dashboard" → "Fluid" → "Repeater")
+- On connect, reads `view` and `views` from status so the button state is correct
 
 ### Connection Handling
 - Connect to `/tmp/lcdstats.sock` on startup
@@ -119,5 +129,5 @@ The server also sends an initial `status` response automatically when a new clie
 
 ## Future Considerations
 
-- More views will be added (view index > 1). The applet should handle an arbitrary number of views — don't hardcode to just 2. A dynamic approach (query `get_status` after each view switch to confirm the current view) is preferred.
+- Views are defined by the daemon (`display_server.py`, `VIEWS`) and advertised in every status message via `views`. Adding a screen = add its name to `VIEWS` + give it a render branch in `lcdstats.py`; applets pick it up on their next `get_status` (sent after each cycle click).
 - View 1 is a live 2-D particle fluid simulation (see `pixfluid.py`). A natural applet addition is a "poke" button (or touch the screen) that sends a `fluid` perturb message at the tapped location.
