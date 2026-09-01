@@ -44,8 +44,10 @@ SDR_PPM       = int(float(os.environ.get("SDR_PPM", "0")))          # dongle cal
 NORM_LO_PCT   = 5.0
 NORM_HI_PCT   = 99.0
 
-SAMPLE_RATE     = 250_000    # samples/sec → ±125 kHz span around center frequency
-CHUNK_SIZE      = 8192       # complex samples per waterfall column (~30 cols/s)
+# 2 MSPS (confirmed stable on this dongle) → ±1 MHz span around center;
+# each pixel row resolves ~8 kHz.
+SAMPLE_RATE     = 2_000_000
+CHUNK_SIZE      = 65536      # complex samples per column → ~30 cols/s at this rate
 MAX_READ_FAILURES = 10       # consecutive read errors before we release the dongle
 
 
@@ -99,6 +101,33 @@ def _load_lib():
 
 _LIB = _load_lib()
 _HANN = np.hanning(CHUNK_SIZE).astype(np.float32)
+
+
+def _build_palette(n=256):
+    """Classic SDR intensity ramp: black → blue → cyan → green → yellow → white.
+    Bold, well-separated steps stay legible after the LCD's RGB→RGB565
+    quantization (red/blue are only 3 bits there)."""
+    anchors = [
+        (0.00, (12,   4,  36)),
+        (0.22, (16,  60, 190)),
+        (0.42, ( 0, 175, 220)),
+        (0.62, ( 0, 215,  90)),
+        (0.80, (235, 225,   0)),
+        (1.00, (255, 255, 255)),
+    ]
+    lut = np.zeros((n, 3), dtype=np.uint8)
+    for i in range(n):
+        p = i / (n - 1)
+        j = next(k for k in range(len(anchors) - 1) if anchors[k][0] <= p <= anchors[k + 1][0])
+        p0, c0 = anchors[j]
+        p1, c1 = anchors[j + 1]
+        t = (p - p0) / (p1 - p0)
+        for ch in range(3):
+            lut[i, ch] = int(round(c0[ch] + t * (c1[ch] - c0[ch])))
+    return lut
+
+
+_PALETTE = _build_palette()   # 256x3 uint8 lookup: grayscale level → RGB
 
 
 def _open_dongle(freq_hz, sample_rate):
@@ -226,10 +255,15 @@ class SdrWaterfall:
     # -- render side -------------------------------------------------------
 
     def snapshot(self):
-        """Latest waterfall frame as a uint8 numpy array (height, width),
-        oldest columns on the left.  Safe from any thread."""
+        """Latest waterfall frame as a grayscale uint8 numpy array
+        (height, width), oldest columns on the left.  Safe from any thread."""
         with self._frame_lock:
             return self._frame.copy()
+
+    def snapshot_rgb(self):
+        """Same frame mapped through the SDR color palette: uint8 (h, w, 3)."""
+        with self._frame_lock:
+            return _PALETTE[self._frame.copy()]
 
     # -- internals ---------------------------------------------------------
 

@@ -782,11 +782,15 @@ try:
             freq_text = f"{sdr_wf.center_hz / 1e6:g} MHz"   # :g keeps 910.525 intact
             draw.text((LPad + 72, drawpos + 4), freq_text[:13], fill="CYAN", font=SmallFont)
 
-            span_text = f"+/-{sdr_wf.sample_rate // 2000} kHz   gain {sdr_wf.gain_db:.0f} dB"
+            half_khz = sdr_wf.sample_rate // 2000
+            span_str = (f"+/-{half_khz} kHz" if half_khz < 1000
+                        else f"+/-{half_khz / 1000:g} MHz")
+            span_text = f"{span_str}   gain {sdr_wf.gain_db:.0f} dB"
             draw.text((LPad + 72, drawpos + SmallFontSize + 4), span_text,
                       fill=(150, 150, 150), font=TinyFont)
 
-            wf_img = Image.fromarray(sdr_wf.snapshot(), "L").convert("RGB")
+            # Color waterfall: palette mapping happens in sdr_waterfall.
+            wf_img = Image.fromarray(sdr_wf.snapshot_rgb(), "RGB")
             image1.paste(wf_img, (0, WF_TOP))
 
             if not sdr_wf.active:
