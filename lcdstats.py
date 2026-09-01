@@ -779,8 +779,8 @@ try:
             # USB/FFT work; here we only blit the latest frame + a header.
             draw.text((LPad, drawpos), "SDR", fill="WHITE", font=FontBig)
 
-            freq_text = f"{sdr_wf.center_hz / 1e6:.1f} MHz"
-            draw.text((LPad + 72, drawpos + 4), freq_text, fill="CYAN", font=SmallFont)
+            freq_text = f"{sdr_wf.center_hz / 1e6:g} MHz"   # :g keeps 910.525 intact
+            draw.text((LPad + 72, drawpos + 4), freq_text[:13], fill="CYAN", font=SmallFont)
 
             span_text = f"+/-{sdr_wf.sample_rate // 2000} kHz   gain {sdr_wf.gain_db:.0f} dB"
             draw.text((LPad + 72, drawpos + SmallFontSize + 4), span_text,
