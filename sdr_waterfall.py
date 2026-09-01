@@ -44,6 +44,11 @@ SDR_PPM       = int(float(os.environ.get("SDR_PPM", "0")))          # dongle cal
 # percentile window that adapts to whatever the band actually contains.
 NORM_LO_PCT   = 5.0
 NORM_HI_PCT   = 99.0
+# The RTL2832U's ADC has a static I/Q bias; in the FFT that concentrates into
+# bin 0 (exactly center frequency) as an ever-present vertical line.  Subtracting
+# each chunk's mean removes it without touching real signals, whose energy is
+# spread over kHz of modulation around the carrier.
+DC_REMOVAL    = True
 
 # 2 MSPS (confirmed stable on this dongle) → ±1 MHz span around center;
 # each pixel row resolves ~8 kHz.
@@ -321,6 +326,8 @@ class SdrWaterfall:
                 re = pairs[:, 0].astype(np.float32) / 32768.0
                 im = pairs[:, 1].astype(np.float32) / 32768.0
                 samples[:len(pairs)] = re + 1j * im
+                if DC_REMOVAL:
+                    samples -= samples.mean()   # kill the ADC's static I/Q bias
                 # Full complex FFT: bin 0 is the carrier (DC).  Reorder into
                 # [negative half][DC..+Nyquist] so the column spans center-
                 # rate/2 .. center+rate/2 with the middle row at center.
