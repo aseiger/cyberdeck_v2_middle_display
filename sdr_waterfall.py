@@ -321,13 +321,17 @@ class SdrWaterfall:
                 fails = 0
 
                 # Zero-pad short reads so every column is full width.
-                samples = np.zeros(CHUNK_SIZE, dtype=np.complex64)
                 pairs = np.frombuffer(buf, dtype=np.int16).reshape(-1, 2)[:n // 2]
                 re = pairs[:, 0].astype(np.float32) / 32768.0
                 im = pairs[:, 1].astype(np.float32) / 32768.0
-                samples[:len(pairs)] = re + 1j * im
                 if DC_REMOVAL:
-                    samples -= samples.mean()   # kill the ADC's static I/Q bias
+                    # Kill the ADC's static I/Q bias — over the VALID samples
+                    # only; averaging in the zero padding would bias the mean
+                    # on short reads and re-create a fake center spike.
+                    re -= re.mean()
+                    im -= im.mean()
+                samples = np.zeros(CHUNK_SIZE, dtype=np.complex64)
+                samples[:len(pairs)] = re + 1j * im
                 # Full complex FFT: bin 0 is the carrier (DC).  Reorder into
                 # [negative half][DC..+Nyquist] so the column spans center-
                 # rate/2 .. center+rate/2 with the middle row at center.
