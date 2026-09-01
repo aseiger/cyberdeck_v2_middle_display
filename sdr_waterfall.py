@@ -10,8 +10,9 @@ the view goes inactive, stop() closes the device so any other program
 
 Architecture: a background reader thread pulls complex samples from
 librtlsdr (ctypes), turns each chunk into one spectrum column (Hann window +
-rFFT + max-pool to display width + adaptive dB scaling) and scrolls it into a
-shared uint8 frame buffer.  The render loop just calls snapshot() when the
+full FFT, negative/positive frequency halves ordered around DC, max-pool to
+display height, adaptive dB scaling) and scrolls it into a shared uint8 frame
+buffer.  The render loop just calls snapshot() when the
 SDR view is active — no DDC/USB work on the main thread, ever.
 
 If the dongle cannot be opened (another program holds it, or it was yanked),
@@ -101,6 +102,15 @@ def _load_lib():
 
 _LIB = _load_lib()
 _HANN = np.hanning(CHUNK_SIZE).astype(np.float32)
+
+# Complex baseband bin order around the carrier: for a complex I/Q FFT, bin 0
+# IS the center frequency (DC), bins 1..N/2 are +offsets and bins N-Nyquist..
+# N-1 are -offsets.  Ordered low→high this is [negative half][DC..+Nyquist],
+# so row 0 = band bottom, middle row = center freq, last row = band top.
+_N = CHUNK_SIZE
+_BIN_ORDER = np.concatenate(
+    [np.arange(_N - _N // 2, _N),        # -Nyquist ... just below DC
+     np.arange(0, _N // 2 + 1)])         # DC ... +Nyquist
 
 
 def _build_palette(n=256):
@@ -269,8 +279,9 @@ class SdrWaterfall:
 
     def _pool_column(self, spec_db):
         """Max-pool a spectrum down to one value per pixel ROW (one column of
-        the waterfall is display-height tall)."""
-        bins = spec_db[1:]                            # drop DC bin
+        the waterfall is display-height tall).  spec_db arrives ordered low→
+        high frequency around the carrier (see _BIN_ORDER)."""
+        bins = spec_db                                # DC/center included now
         m = self.height * (len(bins) // self.height)  # largest height-aligned prefix
         pooled = bins[:m].reshape(self.height, -1).max(axis=1)
 
@@ -310,11 +321,12 @@ class SdrWaterfall:
                 re = pairs[:, 0].astype(np.float32) / 32768.0
                 im = pairs[:, 1].astype(np.float32) / 32768.0
                 samples[:len(pairs)] = re + 1j * im
-                # I/Q is already complex baseband: use a full FFT and keep the
-                # positive-frequency half (DC..Nyquist).  rfft would cast away
-                # the imaginary part.
-                power = np.abs(np.fft.fft(samples * _HANN))[:CHUNK_SIZE // 2 + 1] ** 2
-                spec_db = 10.0 * np.log10(power + 1e-12)
+                # Full complex FFT: bin 0 is the carrier (DC).  Reorder into
+                # [negative half][DC..+Nyquist] so the column spans center-
+                # rate/2 .. center+rate/2 with the middle row at center.
+                power = np.abs(np.fft.fft(samples * _HANN)) ** 2
+                spec_db_full = 10.0 * np.log10(power + 1e-12)
+                spec_db = spec_db_full[_BIN_ORDER]
 
                 col = self._pool_column(spec_db)
                 with self._frame_lock:
