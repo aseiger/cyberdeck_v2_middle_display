@@ -1,0 +1,289 @@
+#!/usr/bin/python
+# -*- coding: UTF-8 -*-
+"""
+sdr_waterfall.py - RTL-SDR spectrum waterfall for the SDR screen view.
+
+Device lifecycle is strict by design (requirement from the deck owner): while
+the SDR view is active this module owns the dongle exclusively; the moment
+the view goes inactive, stop() closes the device so any other program
+(gqrx, rtl_fm, SDR#, ...) can use it immediately.
+
+Architecture: a background reader thread pulls complex samples from
+librtlsdr (ctypes), turns each chunk into one spectrum column (Hann window +
+rFFT + max-pool to display width + adaptive dB scaling) and scrolls it into a
+shared uint8 frame buffer.  The render loop just calls snapshot() when the
+SDR view is active — no DDC/USB work on the main thread, ever.
+
+If the dongle cannot be opened (another program holds it, or it was yanked),
+start() records the reason in .error and returns False; the caller may retry
+on a later view entry.  A reader that dies mid-stream closes the device too,
+so the hardware is never left pinned by this module.
+
+Tunables are environment-overridable: SDR_CENTER_HZ, SDR_GAIN_DB, SDR_PPM.
+"""
+
+import ctypes
+import logging
+import os
+import threading
+import time
+
+import numpy as np
+
+# --- Tunables -------------------------------------------------------------
+# 87.9 MHz: a local FM station sits ~105 kHz below center here, so the view
+# shows a real signal out of the box.  Override per-deck with SDR_CENTER_HZ.
+SDR_CENTER_HZ = float(os.environ.get("SDR_CENTER_HZ", "87900000"))
+SDR_GAIN_DB   = float(os.environ.get("SDR_GAIN_DB", "25.0"))        # manual tuner gain
+SDR_PPM       = int(float(os.environ.get("SDR_PPM", "0")))          # dongle calibration
+
+# Per-column normalization percentiles: map this slice of each column's power
+# distribution to black→white, with anything hotter clipping white.  Peak-
+# referenced scaling washes out in wideband-dense bands (indoor RF), so use a
+# percentile window that adapts to whatever the band actually contains.
+NORM_LO_PCT   = 5.0
+NORM_HI_PCT   = 99.0
+
+SAMPLE_RATE     = 250_000    # samples/sec → ±125 kHz span around center frequency
+CHUNK_SIZE      = 8192       # complex samples per waterfall column (~30 cols/s)
+MAX_READ_FAILURES = 10       # consecutive read errors before we release the dongle
+
+
+def _load_lib():
+    """Load librtlsdr and declare the prototypes we use (None if absent).
+
+    Signatures follow the canonical librtlsdr 0.6 header; read_sync's restype
+    is c_int so an error (-1) can never be misread as a huge uint32 length."""
+    for name in ("librtlsdr.so", "librtlsdr.so.0"):
+        try:
+            lib = ctypes.CDLL(name)
+        except OSError:
+            continue
+
+        c_uint32 = ctypes.c_uint32
+        dev_p = ctypes.POINTER(ctypes.c_void_p)   # rtlsdr_device*
+
+        lib.rtlsdr_open.restype = ctypes.c_int
+        lib.rtlsdr_open.argtypes = [dev_p, c_uint32]
+        lib.rtlsdr_close.restype = None            # void in 0.6git
+        lib.rtlsdr_close.argtypes = [ctypes.c_void_p]
+        lib.rtlsdr_set_center_freq.restype = ctypes.c_int
+        lib.rtlsdr_set_center_freq.argtypes = [ctypes.c_void_p, c_uint32]
+        lib.rtlsdr_set_sample_rate.restype = ctypes.c_int
+        lib.rtlsdr_set_sample_rate.argtypes = [ctypes.c_void_p, c_uint32]
+        lib.rtlsdr_set_tuner_gain_mode.restype = None   # void; best-effort
+        lib.rtlsdr_set_tuner_gain_mode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.rtlsdr_set_agc_mode.restype = None          # void; best-effort
+        lib.rtlsdr_set_agc_mode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.rtlsdr_set_tuner_gain.restype = ctypes.c_int  # gain in 0.1 dB steps
+        lib.rtlsdr_set_tuner_gain.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        lib.rtlsdr_reset_buffer.restype = ctypes.c_int
+        lib.rtlsdr_reset_buffer.argtypes = [ctypes.c_void_p]
+        # This build exports the newer 4-argument read_sync:
+        #   int rtlsdr_read_sync(dev, void *buf, uint32_t len_bytes, int *nread)
+        # (verified by disassembly: x4 is forwarded to libusb_bulk_transfer's
+        # actual_length).  len is BYTES, the return is a libusb status code,
+        # and nread receives the bytes actually transferred.
+        lib.rtlsdr_read_sync.restype = ctypes.c_int
+        lib.rtlsdr_read_sync.argtypes = [ctypes.c_void_p,
+                                         ctypes.POINTER(ctypes.c_int16), c_uint32,
+                                         ctypes.POINTER(ctypes.c_int)]
+        return lib
+
+    logging.warning("[SDR] librtlsdr not found — SDR view disabled")
+    return None
+
+
+_LIB = _load_lib()
+_HANN = np.hanning(CHUNK_SIZE).astype(np.float32)
+
+
+class SdrWaterfall:
+    """Scrolling spectrum waterfall bound to one RTL-SDR device.
+
+    Thread-safety: two small locks — _state_lock guards the device handle /
+    active flag (so start/stop and a dying reader can't double-close the
+    dongle), _frame_lock guards the pixel buffer.  Both critical sections are
+    ~microseconds to one small memcpy; they never hold while USB I/O happens.
+    """
+
+    def __init__(self, width, height):
+        self.width = int(width)
+        self.height = int(height)
+        self.center_hz = SDR_CENTER_HZ
+        self.sample_rate = SAMPLE_RATE
+        self.gain_db = SDR_GAIN_DB
+
+        self._state_lock = threading.Lock()
+        self._frame_lock = threading.Lock()
+        self._frame = np.zeros((self.height, self.width), dtype=np.uint8)
+        self._dev = None            # rtlsdev* handle (None = device closed)
+        self._thread = None
+        self._stop_event = threading.Event()
+        self.active = False          # device open + reader running
+        self.error = ""              # last start/read failure, for the UI
+        self.column_count = 0        # columns produced (debug/tests)
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self):
+        """Open the dongle and start the reader thread.  Idempotent.
+
+        Returns True if the waterfall is (now or already) running, else False
+        with .error explaining why (e.g. device busy)."""
+        with self._state_lock:
+            if self.active and self._thread is not None and self._thread.is_alive():
+                return True
+            if _LIB is None:
+                self.error = "librtlsdr missing"
+                return False
+
+        dev = ctypes.c_void_p()
+        rc = _LIB.rtlsdr_open(ctypes.byref(dev), 0)
+        if rc != 0 or not dev:
+            self.error = "dongle busy or not found"
+            logging.warning("[SDR] rtlsdr_open failed (rc=%d)", rc)
+            return False
+
+        freq_hz = int(self.center_hz * (1.0 + SDR_PPM / 1e6))
+        _LIB.rtlsdr_set_center_freq(dev, freq_hz)
+        if _LIB.rtlsdr_set_sample_rate(dev, SAMPLE_RATE) != 0:
+            logging.warning("[SDR] sample rate %d rejected; using device default", SAMPLE_RATE)
+        # Manual gain for a stable waterfall; fall back to AGC if the tuner
+        # refuses (older tuners / direct-sampling modes).
+        _LIB.rtlsdr_set_tuner_gain_mode(dev, 1)     # manual gain mode
+        if _LIB.rtlsdr_set_tuner_gain(dev, int(round(self.gain_db * 10))) != 0:
+            logging.warning("[SDR] manual gain %.0f dB rejected; using AGC", self.gain_db)
+            _LIB.rtlsdr_set_agc_mode(dev, 1)
+        _LIB.rtlsdr_reset_buffer(dev)
+
+        self._stop_event.clear()
+        buf = (ctypes.c_int16 * (CHUNK_SIZE * 2))()   # complex int16 pairs
+        t = threading.Thread(target=self._reader, args=(buf,), name="sdr-waterfall", daemon=True)
+
+        # Publish state BEFORE starting the thread so the reader can never
+        # observe a half-opened device.
+        with self._state_lock:
+            self._dev = dev
+            self._thread = t
+            self.active = True
+            self.error = ""
+        t.start()
+
+        logging.info("[SDR] opened dongle @ %.1f MHz, %d S/s, gain %.0f dB",
+                     freq_hz / 1e6, SAMPLE_RATE, self.gain_db)
+        return True
+
+    def stop(self):
+        """Stop the reader and close the device.  Idempotent; safe to call
+        when not active.  After this returns the dongle is free for other
+        programs."""
+        self._stop_event.set()
+        with self._state_lock:
+            t = self._thread
+            dev = self._dev          # main thread takes ownership of close
+            self._dev = None
+
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)      # in-flight read finishes within ~one chunk
+
+        if dev is not None and _LIB is not None:
+            _LIB.rtlsdr_close(dev)
+
+        with self._state_lock:
+            self.active = False
+            self._thread = None
+
+        logging.info("[SDR] closed dongle — device free for other programs")
+
+    # -- render side -------------------------------------------------------
+
+    def snapshot(self):
+        """Latest waterfall frame as a uint8 numpy array (height, width),
+        oldest columns on the left.  Safe from any thread."""
+        with self._frame_lock:
+            return self._frame.copy()
+
+    # -- internals ---------------------------------------------------------
+
+    def _pool_column(self, spec_db):
+        """Max-pool a spectrum down to one value per pixel ROW (one column of
+        the waterfall is display-height tall)."""
+        bins = spec_db[1:]                            # drop DC bin
+        m = self.height * (len(bins) // self.height)  # largest height-aligned prefix
+        pooled = bins[:m].reshape(self.height, -1).max(axis=1)
+
+        lo = float(np.percentile(pooled, NORM_LO_PCT))
+        hi = float(np.percentile(pooled, NORM_HI_PCT))
+        span = max(hi - lo, 1e-6)     # flat column (no data yet) → black
+        col = np.clip((pooled - lo) / span * 255.0, 0, 255)
+        return col.astype(np.uint8)
+
+    def _reader(self, buf):
+        with self._state_lock:
+            dev = self._dev          # published by start() before we ran
+        if dev is None:              # stop() won the race — exit quietly
+            return
+        nread = ctypes.c_int(0)
+        fails = 0
+        try:
+            while not self._stop_event.is_set():
+                rc = _LIB.rtlsdr_read_sync(dev, buf, CHUNK_SIZE * 2,
+                                           ctypes.byref(nread))
+                n = nread.value
+                if rc != 0 or n <= 0:
+                    # Transient USB hiccups happen; give the bus a moment and
+                    # retry before giving up on the device.
+                    fails += 1
+                    if fails >= MAX_READ_FAILURES:
+                        logging.warning("[SDR] %d consecutive read errors (rc=%d) — releasing dongle",
+                                        fails, rc)
+                        break
+                    time.sleep(0.05)
+                    continue
+                fails = 0
+
+                # Zero-pad short reads so every column is full width.
+                samples = np.zeros(CHUNK_SIZE, dtype=np.complex64)
+                pairs = np.frombuffer(buf, dtype=np.int16).reshape(-1, 2)[:n // 2]
+                re = pairs[:, 0].astype(np.float32) / 32768.0
+                im = pairs[:, 1].astype(np.float32) / 32768.0
+                samples[:len(pairs)] = re + 1j * im
+                # I/Q is already complex baseband: use a full FFT and keep the
+                # positive-frequency half (DC..Nyquist).  rfft would cast away
+                # the imaginary part.
+                power = np.abs(np.fft.fft(samples * _HANN))[:CHUNK_SIZE // 2 + 1] ** 2
+                spec_db = 10.0 * np.log10(power + 1e-12)
+
+                col = self._pool_column(spec_db)
+                with self._frame_lock:
+                    if self.active and self._thread is threading.current_thread():
+                        # In-place shift (np.roll returns a copy — don't use it
+                        # here).  Overlapping-slice assignment uses memmove.
+                        self._frame[:, :-1] = self._frame[:, 1:]
+                        self._frame[:, -1] = col
+                self.column_count += 1
+
+            # Unexpected death (read error / USB drop): release the device so
+            # no other program is blocked by this module.  stop() from the
+            # main thread races us safely — whoever grabs _dev first closes it.
+            if not self._stop_event.is_set():
+                with self._state_lock:
+                    dev = self._dev
+                    self._dev = None
+                    self.active = False
+                    self._thread = None
+                self.error = "dongle read error"
+                if _LIB is not None and dev is not None:
+                    _LIB.rtlsdr_close(dev)
+                    logging.warning("[SDR] released dongle after read error")
+        except Exception as e:   # never let the daemon die over the SDR view
+            logging.exception("[SDR] reader crashed: %s", e)
+            self.error = "reader crash"
+            with self._state_lock:
+                dev = self._dev
+                self._dev = None
+                self.active = False
+                self._thread = None
+            if _LIB is not None and dev is not None:
+                _LIB.rtlsdr_close(dev)

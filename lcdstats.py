@@ -24,6 +24,7 @@ import gpsStats
 import repeaterStats
 import display_server
 from pixfluid import PixFluid
+import sdr_waterfall
 
 def RedGreenColorScale(value : float, invert : bool = False):
     if (value > 100): value = 100
@@ -173,12 +174,13 @@ fan_tach = None
 ipc_server = None
 gps_collector = None
 repeater_collector = None
+sdr_wf = None
 disp = None
 
 
 def cleanup_and_exit(signum=None, frame=None):
     """Force peripherals to a safe state during service stop/shutdown."""
-    global case_fan, fan_tach, ipc_server, gps_collector, repeater_collector, disp
+    global case_fan, fan_tach, ipc_server, gps_collector, repeater_collector, sdr_wf, disp
 
     if case_fan is not None:
         try:
@@ -220,6 +222,15 @@ def cleanup_and_exit(signum=None, frame=None):
             pass
         finally:
             repeater_collector = None
+
+    if sdr_wf is not None:
+        # Release the RTL-SDR dongle on shutdown so other programs can use it.
+        try:
+            sdr_wf.stop()
+        except Exception:
+            pass
+        finally:
+            sdr_wf = None
 
     if disp is not None:
         try:
@@ -337,6 +348,16 @@ try:
     fluid = PixFluid(target_size=(disp.width, disp.height))
     fluid.reset()
 
+    # View 3: RTL-SDR spectrum waterfall (sdr_waterfall.py).  The dongle is
+    # opened ONLY while view 3 is active and closed on exit/shutdown, so it
+    # stays free for other programs all the rest of the time.
+    WF_TOP = 60                    # header strip: title + frequency text
+    WF_BOTTOM_MARGIN = 8           # gap above the panel border line
+    sdr_wf = sdr_waterfall.SdrWaterfall(
+        width=disp.width,
+        height=disp.height - WF_TOP - WF_BOTTOM_MARGIN,
+    )
+
     case_fan = HardwarePWM(CASE_FAN, frequency=1000)
     case_fan.value = 0.0
 
@@ -364,6 +385,7 @@ try:
     last_aux_duty = -1.0             # last written duty, avoid unnecessary writes
     last_loop_time = time.monotonic() # track actual iteration delta for smoothing
     current_view = 0                 # active screen view index
+    sdr_last_open_try = 0.0          # throttle dongle-open retries to 1/s
 
     while True:
         now = time.monotonic()
@@ -435,6 +457,17 @@ try:
         # Sync active view
         current_view = ipc_server.current_view
 
+        # View 3 owns the RTL-SDR dongle exclusively while active: open on
+        # entry (retrying at most once a second if another program holds it),
+        # close on exit so other programs get it back immediately.
+        sdr_wanted = (current_view == 3)
+        if sdr_wanted and not sdr_wf.active:
+            if now - sdr_last_open_try > 1.0:
+                sdr_last_open_try = now
+                sdr_wf.start()
+        elif not sdr_wanted and sdr_wf.active:
+            sdr_wf.stop()
+
         # Apply fluid events queued by applet clients (perturb / reset)
         for ev in ipc_server.drain_fluid_events():
             action = ev.get("action")
@@ -463,9 +496,10 @@ try:
                 )
 
         # Full-frame pushes are bandwidth-bound: run the SPI faster in the
-        # fluid view, restore the conservative rate for the dashboard.
+        # fluid and SDR views (both push full frames), restore the
+        # conservative rate for the dashboard.
         if disp.SPI is not None:
-            want_speed = FLUID_SPI_HZ if current_view == 1 else disp.SPEED
+            want_speed = FLUID_SPI_HZ if current_view in (1, 3) else disp.SPEED
             if disp.SPI.max_speed_hz != want_speed:
                 disp.SPI.max_speed_hz = want_speed
 
@@ -741,6 +775,26 @@ try:
                 if not packets:
                     draw.text((LPad, drawpos), "no packets yet", fill="CYAN", font=TinyFont)
 
+        elif current_view == 3:
+            # View 3: RTL-SDR spectrum waterfall.  The reader thread owns all
+            # USB/FFT work; here we only blit the latest frame + a header.
+            draw.text((LPad, drawpos), "SDR", fill="WHITE", font=FontBig)
+
+            freq_text = f"{sdr_wf.center_hz / 1e6:.1f} MHz"
+            draw.text((LPad + 72, drawpos + 4), freq_text, fill="CYAN", font=SmallFont)
+
+            span_text = f"+/-{sdr_wf.sample_rate // 2000} kHz   gain {sdr_wf.gain_db:.0f} dB"
+            draw.text((LPad + 72, drawpos + SmallFontSize + 4), span_text,
+                      fill=(150, 150, 150), font=TinyFont)
+
+            wf_img = Image.fromarray(sdr_wf.snapshot(), "L").convert("RGB")
+            image1.paste(wf_img, (0, WF_TOP))
+
+            if not sdr_wf.active:
+                # Dongle busy / missing / dropped — explain over the frame.
+                msg = sdr_wf.error or "acquiring..."
+                draw.text((LPad + 30, disp.height // 2), msg[:16], fill="RED", font=SmallFont)
+
         else:
             # Unknown view — draw a placeholder
             draw.text((LPad, drawpos), f"View {current_view}", fill="WHITE", font=FontBig)
@@ -769,7 +823,7 @@ try:
                 ShowImageRegion(disp, image1.crop(region), left, top)
         displayed_image = image1
         
-        if current_view == 1:
+        if current_view in (1, 3):
             time.sleep(FLUID_FRAME_INTERVAL_SECONDS)
         else:
             time.sleep(DISPLAY_POLL_INTERVAL_SECONDS)
