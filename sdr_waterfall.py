@@ -35,7 +35,7 @@ import numpy as np
 # Center frequency for the waterfall view (±125 kHz at 250 kS/s).
 # Override per-deck with SDR_CENTER_HZ.
 SDR_CENTER_HZ = float(os.environ.get("SDR_CENTER_HZ", "910525000"))
-SDR_GAIN_DB   = float(os.environ.get("SDR_GAIN_DB", "3.0"))        # manual tuner gain (user-tuned: was 25)
+SDR_GAIN_DB   = float(os.environ.get("SDR_GAIN_DB", "25.0"))       # manual tuner gain; AGC is never used
 SDR_PPM       = int(float(os.environ.get("SDR_PPM", "0")))          # dongle calibration
 
 # Per-column normalization percentiles: map this slice of each column's power
@@ -175,11 +175,13 @@ def _open_dongle(freq_hz, sample_rate):
     if _LIB.rtlsdr_get_sample_rate(dev, ctypes.byref(eff)) != 0 or not eff.value:
         eff.value = sample_rate   # query failed — assume what we asked for
 
-    # Manual gain for a stable display; fall back to AGC if the tuner refuses.
-    _LIB.rtlsdr_set_tuner_gain_mode(dev, 1)
+    # Manual gain only — AGC is deliberately disabled (gain mode 0 would
+    # enable it).  Automatic gain makes the waterfall brightness chase around
+    # over time; a fixed manual level keeps the display stable and comparable.
+    _LIB.rtlsdr_set_tuner_gain_mode(dev, 1)   # 1 = manual, AGC off
     if _LIB.rtlsdr_set_tuner_gain(dev, int(round(SDR_GAIN_DB * 10))) != 0:
-        logging.warning("[SDR] manual gain %.0f dB rejected; using AGC", SDR_GAIN_DB)
-        _LIB.rtlsdr_set_agc_mode(dev, 1)
+        # Stay in manual mode at the tuner's own default rather than enabling AGC.
+        logging.warning("[SDR] manual gain %.0f dB rejected; keeping tuner default", SDR_GAIN_DB)
     _LIB.rtlsdr_reset_buffer(dev)
 
     return dev, int(eff.value)
