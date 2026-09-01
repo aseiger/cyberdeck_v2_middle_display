@@ -49,6 +49,13 @@ NORM_HI_PCT   = 99.0
 # each chunk's mean removes it without touching real signals, whose energy is
 # spread over kHz of modulation around the carrier.
 DC_REMOVAL    = True
+# The R820T's local oscillator also leaks into its own mixer input; that energy
+# lands at baseband zero for ANY tuning (verified by capturing two center
+# frequencies — a real signal would shift with tuning, this did not), so no
+# filtering can separate it from a true carrier.  A narrow notch around DC
+# removes the line; modulated signals spread over kHz and stay visible except
+# their pure-carrier core.
+DC_NOTCH_HZ   = 150.0      # half-width of the DC notch in Hz (0 disables)
 
 # 2 MSPS (confirmed stable on this dongle) → ±1 MHz span around center;
 # each pixel row resolves ~8 kHz.
@@ -336,6 +343,12 @@ class SdrWaterfall:
                 # [negative half][DC..+Nyquist] so the column spans center-
                 # rate/2 .. center+rate/2 with the middle row at center.
                 power = np.abs(np.fft.fft(samples * _HANN)) ** 2
+                if DC_NOTCH_HZ > 0:
+                    # Mask ±DC_NOTCH_HZ around baseband zero (bin 0 and its
+                    # wrap-around neighbours hold the negative offsets).
+                    k = int(round(DC_NOTCH_HZ * CHUNK_SIZE / SAMPLE_RATE))
+                    power[:k + 1] = 0.0
+                    power[-k:] = 0.0
                 spec_db_full = 10.0 * np.log10(power + 1e-12)
                 spec_db = spec_db_full[_BIN_ORDER]
 
