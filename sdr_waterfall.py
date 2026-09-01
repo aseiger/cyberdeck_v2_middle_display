@@ -35,7 +35,7 @@ import numpy as np
 # Center frequency for the waterfall view (±125 kHz at 250 kS/s).
 # Override per-deck with SDR_CENTER_HZ.
 SDR_CENTER_HZ = float(os.environ.get("SDR_CENTER_HZ", "910525000"))
-SDR_GAIN_DB   = float(os.environ.get("SDR_GAIN_DB", "6.3"))        # manual tuner gain (was 25, then 12.5 — still hot)
+SDR_GAIN_DB   = float(os.environ.get("SDR_GAIN_DB", "3.0"))        # manual tuner gain (user-tuned: was 25)
 SDR_PPM       = int(float(os.environ.get("SDR_PPM", "0")))          # dongle calibration
 
 # Per-column normalization percentiles: map this slice of each column's power
