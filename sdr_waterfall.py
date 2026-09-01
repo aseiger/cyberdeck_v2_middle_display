@@ -11,7 +11,8 @@ the view goes inactive, stop() closes the device so any other program
 Architecture: a background reader thread pulls complex samples from
 librtlsdr (ctypes), turns each chunk into one spectrum column (Hann window +
 full FFT, negative/positive frequency halves ordered around DC, max-pool to
-display height, adaptive dB scaling) and scrolls it into a shared uint8 frame
+display height, level-normalized against a reference that is frozen after a
+short calibration window) and scrolls it into a shared uint8 frame
 buffer.  The render loop just calls snapshot() when the
 SDR view is active — no DDC/USB work on the main thread, ever.
 
@@ -44,6 +45,11 @@ SDR_PPM       = int(float(os.environ.get("SDR_PPM", "0")))          # dongle cal
 # percentile window that adapts to whatever the band actually contains.
 NORM_LO_PCT   = 5.0
 NORM_HI_PCT   = 99.0
+# Columns used to CALIBRATE the display level reference after a device open.
+# During that window live percentiles are tracked (so it looks right in any RF
+# environment); afterwards the reference is FROZEN, so brightness changes on
+# screen reflect real RF level changes instead of per-column auto-gain chasing.
+CALIB_COLUMNS = 75        # ~3 s at the current scroll rate
 # The RTL2832U's ADC has a static I/Q bias; in the FFT that concentrates into
 # bin 0 (exactly center frequency) as an ever-present vertical line.  Subtracting
 # each chunk's mean removes it without touching real signals, whose energy is
@@ -217,6 +223,9 @@ class SdrWaterfall:
         self.active = False          # device open + reader running
         self.error = ""              # last start/read failure, for the UI
         self.column_count = 0        # columns produced (debug/tests)
+        self._cols_since_open = 0    # columns this session (calibration window)
+        self._ref_lo = None          # frozen normalization reference
+        self._ref_hi = None          # (None pair = still calibrating)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -248,6 +257,9 @@ class SdrWaterfall:
             self._thread = t
             self.active = True
             self.error = ""
+            self._cols_since_open = 0   # each device session recalibrates
+            self._ref_lo = None
+            self._ref_hi = None
         t.start()
 
         logging.info("[SDR] opened dongle @ %.1f MHz, %d S/s, gain %.0f dB",
@@ -298,9 +310,26 @@ class SdrWaterfall:
         bins = spec_db                                # DC/center included now
         m = self.height * (len(bins) // self.height)  # largest height-aligned prefix
         pooled = bins[:m].reshape(self.height, -1).max(axis=1)
+        return self._scale(pooled)
 
-        lo = float(np.percentile(pooled, NORM_LO_PCT))
-        hi = float(np.percentile(pooled, NORM_HI_PCT))
+    def _scale(self, pooled):
+        """Map pooled dB values to 0..255 against the level reference.
+
+        For the first CALIB_COLUMNS after open we track live percentiles so
+        the display looks right in any environment; at the end of that window
+        the reference is frozen.  (Per-column rescaling forever made brightness
+        chase around like AGC — a fixed reference makes brightness changes
+        mean real level changes.)"""
+        if self._ref_lo is None and self._cols_since_open >= CALIB_COLUMNS - 1:
+            lo = float(np.percentile(pooled, NORM_LO_PCT))
+            hi = float(np.percentile(pooled, NORM_HI_PCT))
+            if hi - lo > 0.5:     # freeze only on a non-degenerate window
+                self._ref_lo, self._ref_hi = lo, hi
+        if self._ref_lo is None:  # still calibrating → live percentiles
+            lo = float(np.percentile(pooled, NORM_LO_PCT))
+            hi = float(np.percentile(pooled, NORM_HI_PCT))
+        else:
+            lo, hi = self._ref_lo, self._ref_hi
         span = max(hi - lo, 1e-6)     # flat column (no data yet) → black
         col = np.clip((pooled - lo) / span * 255.0, 0, 255)
         return col.astype(np.uint8)
@@ -362,6 +391,7 @@ class SdrWaterfall:
                         self._frame[:, :-1] = self._frame[:, 1:]
                         self._frame[:, -1] = col
                 self.column_count += 1
+                self._cols_since_open += 1
 
             # Unexpected death (read error / USB drop): release the device so
             # no other program is blocked by this module.  stop() from the
