@@ -175,12 +175,13 @@ ipc_server = None
 gps_collector = None
 repeater_collector = None
 sdr_wf = None
+sdr_band = None
 disp = None
 
 
 def cleanup_and_exit(signum=None, frame=None):
     """Force peripherals to a safe state during service stop/shutdown."""
-    global case_fan, fan_tach, ipc_server, gps_collector, repeater_collector, sdr_wf, disp
+    global case_fan, fan_tach, ipc_server, gps_collector, repeater_collector, sdr_wf, sdr_band, disp
 
     if case_fan is not None:
         try:
@@ -231,6 +232,14 @@ def cleanup_and_exit(signum=None, frame=None):
             pass
         finally:
             sdr_wf = None
+
+    if sdr_band is not None:
+        try:
+            sdr_band.stop()
+        except Exception:
+            pass
+        finally:
+            sdr_band = None
 
     if disp is not None:
         try:
@@ -357,6 +366,12 @@ try:
         width=disp.width,
         height=disp.height - WF_TOP - WF_BOTTOM_MARGIN,
     )
+    # View 4: full-band log-frequency band map (sweeps 24 MHz–1.76 GHz,
+    # see SdrPanorama).  Same exclusive-dongle rules as view 3.
+    sdr_band = sdr_waterfall.SdrPanorama(
+        width=disp.width,
+        height=disp.height - WF_TOP - WF_BOTTOM_MARGIN,
+    )
 
     case_fan = HardwarePWM(CASE_FAN, frequency=1000)
     case_fan.value = 0.0
@@ -385,7 +400,8 @@ try:
     last_aux_duty = -1.0             # last written duty, avoid unnecessary writes
     last_loop_time = time.monotonic() # track actual iteration delta for smoothing
     current_view = 0                 # active screen view index
-    sdr_last_open_try = 0.0          # throttle dongle-open retries to 1/s
+    sdr_last_open_try = 0.0          # throttle dongle-open retries (view 3)
+    band_last_open_try = 0.0         # throttle dongle-open retries (view 4)
 
     while True:
         now = time.monotonic()
@@ -457,16 +473,24 @@ try:
         # Sync active view
         current_view = ipc_server.current_view
 
-        # View 3 owns the RTL-SDR dongle exclusively while active: open on
-        # entry (retrying at most once a second if another program holds it),
-        # close on exit so other programs get it back immediately.
-        sdr_wanted = (current_view == 3)
-        if sdr_wanted and not sdr_wf.active:
+        # Views 3 (waterfall) and 4 (band map) own the RTL-SDR dongle
+        # exclusively while active: open on entry — retrying at most once a
+        # second if another program holds it — close on exit so other
+        # programs get it back immediately.  Stops run before starts so a
+        # direct 3→4 switch never has two opens in flight.
+        if current_view != 3 and sdr_wf.active:
+            sdr_wf.stop()
+        elif current_view != 4 and sdr_band.active:
+            sdr_band.stop()
+
+        if current_view == 3 and not sdr_wf.active:
             if now - sdr_last_open_try > 1.0:
                 sdr_last_open_try = now
                 sdr_wf.start()
-        elif not sdr_wanted and sdr_wf.active:
-            sdr_wf.stop()
+        elif current_view == 4 and not sdr_band.active:
+            if now - band_last_open_try > 1.0:
+                band_last_open_try = now
+                sdr_band.start()
 
         # Apply fluid events queued by applet clients (perturb / reset)
         for ev in ipc_server.drain_fluid_events():
@@ -794,6 +818,30 @@ try:
                 # Dongle busy / missing / dropped — explain over the frame.
                 msg = sdr_wf.error or "acquiring..."
                 draw.text((LPad + 30, disp.height // 2), msg[:16], fill="RED", font=SmallFont)
+
+        elif current_view == 4:
+            # View 4: full-band band map — x is log frequency (24 MHz–
+            # 1.76 GHz across the width), y is time scrolling up, one row per
+            # completed sweep (~30 s).  Bright vertical lines are persistent
+            # transmitters at their true frequencies.
+            draw.text((LPad, drawpos), "SDR BAND", fill="WHITE", font=FontBig)
+
+            # Log-frequency map: x spans 24 MHz–1.76 GHz, one row per sweep.
+            if sdr_band.sweep_seconds:
+                scan_text = f"~{sdr_band.sweep_seconds:.0f}s/scan"
+                draw.text((LPad + 168, drawpos + 4), scan_text[:12],
+                          fill="CYAN", font=TinyFont)
+
+            wf_img = Image.fromarray(sdr_band.snapshot(), "L").convert("RGB")
+            image1.paste(wf_img, (0, WF_TOP))
+
+            if not sdr_band.active:
+                msg = sdr_band.error or "acquiring..."
+                draw.text((LPad + 30, disp.height // 2), msg[:16], fill="RED", font=SmallFont)
+            elif sdr_band.row_count == 0:
+                # First sweep still in progress — the map is empty so far.
+                draw.text((LPad + 40, disp.height // 2), "first scan...",
+                          fill="YELLOW", font=SmallFont)
 
         else:
             # Unknown view — draw a placeholder

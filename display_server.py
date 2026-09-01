@@ -26,7 +26,8 @@ Client -> Server messages:
 
 Server -> Client messages (sent in response to get_status):
   {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50,
-   "view": 0, "views": ["Dashboard", "Fluid", "Repeater", "SDR"]}
+   "view": 0, "views": ["Dashboard", "Fluid", "Repeater", "SDR",
+                        "SDR Band"]}
 
 The server is the source of truth for the available screens: VIEWS below is
 the single registry of screen names (position in the list == view index). It
@@ -49,6 +50,7 @@ VIEWS = [
     "Fluid",      # 1: live pixel fluid simulation
     "Repeater",   # 2: openhop repeater status + packet feed
     "SDR",        # 3: RTL-SDR spectrum waterfall (dongle open only while shown)
+    "SDR Band",   # 4: full-band log-frequency band map, 24 MHz–1.76 GHz
 ]
 
 SOCKET_PATH = "/tmp/lcdstats.sock"
