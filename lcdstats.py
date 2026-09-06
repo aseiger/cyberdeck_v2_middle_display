@@ -364,6 +364,12 @@ try:
         width=disp.width,
         height=disp.height - WF_TOP - WF_BOTTOM_MARGIN,
     )
+    # Advertise the initial tuning state so applet clients see a real center
+    # frequency / gain / bandwidth in status from the start (not null).
+    ipc_server.set_sdr_state(sdr_wf.center_hz, sdr_wf.gain_db,
+                             sdr_wf.sample_rate, sdr_wf.agc_enabled)
+    last_sdr_reported = (sdr_wf.center_hz, sdr_wf.gain_db,
+                         sdr_wf.sample_rate, sdr_wf.agc_enabled)
     case_fan = HardwarePWM(CASE_FAN, frequency=1000)
     case_fan.value = 0.0
 
@@ -500,6 +506,35 @@ try:
                     on=bool(ev.get("on", True)),
                     row=ev.get("row"),
                 )
+
+        # Apply SDR tuning events queued by applet clients (tune / freq /
+        # bandwidth / gain / agc).  Applied whenever they arrive — while the
+        # dongle is open this reconfigures it live; while closed the new state
+        # takes effect on next open.
+        for ev in ipc_server.drain_sdr_events():
+            try:
+                action = ev.get("action")
+                if action == "tune":
+                    sdr_wf.tune(float(ev.get("delta_hz", 0)))
+                elif action == "freq":
+                    sdr_wf.set_center_freq(float(ev.get("hz", 0)))
+                elif action == "bandwidth":
+                    sdr_wf.set_sample_rate(int(float(ev.get("rate_sps", 0))))
+                elif action == "gain":
+                    sdr_wf.adjust_gain(float(ev.get("delta_db", 0)))
+                elif action == "agc":
+                    sdr_wf.set_agc(bool(ev.get("on", False)))
+                else:
+                    logging.debug("[SDR] ignoring unknown event %r", ev)
+            except (TypeError, ValueError):
+                logging.warning("[SDR] bad tuning event %r", ev)
+
+        # Keep the server's advertised SDR state fresh for status messages.
+        sdr_now = (sdr_wf.center_hz, sdr_wf.gain_db,
+                   sdr_wf.sample_rate, sdr_wf.agc_enabled)
+        if sdr_now != last_sdr_reported:
+            ipc_server.set_sdr_state(*sdr_now)
+            last_sdr_reported = sdr_now
 
         # SPI clock is fixed at SPI_FREQ_HZ for all views — it must never be
         # retuned per view (the old per-view speed bump is what caused the

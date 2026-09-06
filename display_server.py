@@ -22,11 +22,22 @@ Client -> Server messages:
    "side": "left", "on": true, "row": 2}      # hold a spout on/off while a key is held (keywater);
                                               #   row 1-4 = keyboard row -> pour height,
                                               #   side "center" = space bar (top center)
+  {"type": "sdr", "action": "tune", "delta_hz": 25000}   # step the SDR center frequency by delta Hz
+                                                         #   (+/-; applied by the render loop, live or on next open)
+  {"type": "sdr", "action": "freq", "hz": 910525000}     # set the SDR center frequency absolutely (Hz)
+  {"type": "sdr", "action": "bandwidth", "rate_sps": 3000000}
+                                                         #   set sample rate / bandwidth (S/s; device may clamp,
+                                                         #   effective value is reported back in status)
+  {"type": "sdr", "action": "gain", "delta_db": -1}      # step the SDR manual gain (dB, +/-)
+  {"type": "sdr", "action": "agc", "on": true}          # enable/disable automatic gain
   {"type": "get_status"}                     # request current state
 
 Server -> Client messages (sent in response to get_status):
   {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50,
-   "view": 0, "views": ["Dashboard", "Fluid", "Repeater", "SDR"]}
+   "view": 0, "views": ["Dashboard", "Fluid", "Repeater", "SDR"],
+   "sdr": {"center_hz": 910525000, "gain_db": 25.0, "rate_sps": 2000000,
+           "agc": false}}                        # SDR tuning state (null until
+                                                 #   the daemon has reported it)
 
 The server is the source of truth for the available screens: VIEWS below is
 the single registry of screen names (position in the list == view index). It
@@ -70,6 +81,8 @@ class DisplayControlServer:
         self._volume = -1.0
         self._current_view = 0    # active screen view index
         self._fluid_events = []   # pending fluid-sim events, drained by the render thread
+        self._sdr_events = []     # pending SDR tuning events (tune/gain), same pattern
+        self._sdr_state = None    # {"center_hz": f, "gain_db": f} reported to clients
 
         self._server_sock = None
         self._clients = []        # list of connected client sockets
@@ -124,6 +137,34 @@ class DisplayControlServer:
             events = self._fluid_events
             self._fluid_events = []
         return events
+
+    def drain_sdr_events(self):
+        """Pop and return all pending SDR tuning events (view 3).
+
+        Called by the render loop; returns a list of event dicts, each with
+        an ``action`` key ("tune" + delta_hz / "gain" + delta_db).  The daemon
+        owns the waterfall/dongle and applies them — this server only queues.
+        """
+        with self._lock:
+            events = self._sdr_events
+            self._sdr_events = []
+        return events
+
+    def set_sdr_state(self, center_hz=None, gain_db=None,
+                      rate_sps=0.0, agc=False):
+        """Publish the SDR tuning state for status messages.
+
+        Called by the render loop when any part of it changes (center Hz,
+        manual gain dB, effective sample rate S/s, AGC flag).  Pass
+        None/None to clear."""
+        with self._lock:
+            if center_hz is None and gain_db is None:
+                self._sdr_state = None
+            else:
+                self._sdr_state = {"center_hz": float(center_hz),
+                                   "gain_db": float(gain_db),
+                                   "rate_sps": float(rate_sps),
+                                   "agc": bool(agc)}
 
     @property
     def has_brightness(self):
@@ -284,6 +325,15 @@ class DisplayControlServer:
                 self._fluid_events.append(event)
             logger.debug("Fluid event -> %s", event.get("action"))
 
+        elif msg_type == "sdr":
+            # SDR tuning request (view 3).  Queued like fluid events; the
+            # render loop applies it to the waterfall (live if the dongle is
+            # open, otherwise on the next open).
+            event = {k: v for k, v in msg.items() if k != "type"}
+            with self._lock:
+                self._sdr_events.append(event)
+            logger.debug("SDR event -> %s", event.get("action"))
+
         elif msg_type == "get_status":
             self._send_status(client)
 
@@ -300,6 +350,8 @@ class DisplayControlServer:
                 "view": self._current_view,
                 # Advertised screen registry: position == view index.
                 "views": list(VIEWS),
+                # SDR tuning state (null until the daemon has reported it).
+                "sdr": self._sdr_state,
             }) + "\n"
 
     def _send_status(self, client):

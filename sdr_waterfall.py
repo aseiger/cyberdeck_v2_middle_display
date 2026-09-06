@@ -21,7 +21,11 @@ start() records the reason in .error and returns False; the caller may retry
 on a later view entry.  A reader that dies mid-stream closes the device too,
 so the hardware is never left pinned by this module.
 
-Tunables are environment-overridable: SDR_CENTER_HZ, SDR_GAIN_DB, SDR_PPM.
+Tunables are environment-overridable (SDR_CENTER_HZ, SDR_GAIN_DB, SDR_PPM)
+and adjustable at runtime while the view is active — center frequency
+(tune / set_center_freq), manual gain (adjust_gain) and AGC (set_agc),
+sample rate / bandwidth (set_sample_rate) — driven by applet IPC events
+(display_server "sdr" messages).
 """
 
 import ctypes
@@ -62,6 +66,20 @@ DC_REMOVAL    = True
 # removes the line; modulated signals spread over kHz and stay visible except
 # their pure-carrier core.
 DC_NOTCH_HZ   = 150.0      # half-width of the DC notch in Hz (0 disables)
+
+# Runtime tuning limits.  The tuner's own hardware range is still enforced by
+# rtlsdr_set_center_freq / rtlsdr_set_tuner_gain; these just keep the software
+# state sane (positive, fits the 32-bit device API, plausible gain window).
+TUNE_MIN_HZ     = 1_000_000        # below any band an RTL-SDR dongle can use
+TUNE_MAX_HZ     = 4_000_000_000    # < UINT32_MAX (device API takes uint32 Hz)
+GAIN_MIN_DB     = 0.0              # manual gain window for the R820T/E4000
+GAIN_MAX_DB     = 49.0
+# Sample rate (= waterfall bandwidth, S/s) runtime limits.  librtlsdr itself
+# rejects rates <= 225k and > 3.2M, plus a resampler dead zone between ~301k
+# and ~900k — so the usable windows are roughly 226k-300k or 901k-3.2M.  The
+# device may clamp further; the effective rate is always queried back.
+BANDWIDTH_MIN_RATE  = 226_000      # lowest rate librtlsdr will accept
+BANDWIDTH_MAX_RATE  = 3_200_000    # RTL2832U ceiling (confirmed stable here: 2 MS/s)
 
 # 2 MSPS (confirmed stable on this dongle) → ±1 MHz span around center;
 # each pixel row resolves ~8 kHz.
@@ -158,7 +176,15 @@ def _build_palette(n=256):
 _PALETTE = _build_palette()   # 256x3 uint8 lookup: grayscale level → RGB
 
 
-def _open_dongle(freq_hz, sample_rate):
+def _apply_center_freq(dev, center_hz):
+    """Point an open dongle at `center_hz` (PPM-corrected), like _open_dongle."""
+    freq_hz = int(center_hz * (1.0 + SDR_PPM / 1e6))
+    rc = _LIB.rtlsdr_set_center_freq(dev, freq_hz)
+    if rc != 0:
+        logging.warning("[SDR] set_center_freq %d Hz failed (rc=%d)", freq_hz, rc)
+
+
+def _open_dongle(freq_hz, sample_rate, gain_db, agc=False):
     """Open device 0 and configure it.  Returns (dev|None, effective_rate).
 
     The effective rate is queried back from the device: the dongle may clamp
@@ -177,20 +203,23 @@ def _open_dongle(freq_hz, sample_rate):
     if _LIB.rtlsdr_set_sample_rate(dev, sample_rate) != 0:
         logging.warning("[SDR] sample rate %d rejected; using device default", sample_rate)
 
-    eff = ctypes.c_uint32(0)
-    if _LIB.rtlsdr_get_sample_rate(dev, ctypes.byref(eff)) != 0 or not eff.value:
-        eff.value = sample_rate   # query failed — assume what we asked for
+    # A one-element array auto-converts to a pointer at the call (and stays
+    # an ordinary object in test doubles, unlike ctypes.byref's opaque wrapper).
+    eff = (ctypes.c_uint32 * 1)(0)
+    if _LIB.rtlsdr_get_sample_rate(dev, eff) != 0 or not eff[0]:
+        eff[0] = sample_rate      # query failed — assume what we asked for
 
-    # Manual gain only — AGC is deliberately disabled (gain mode 0 would
-    # enable it).  Automatic gain makes the waterfall brightness chase around
-    # over time; a fixed manual level keeps the display stable and comparable.
-    _LIB.rtlsdr_set_tuner_gain_mode(dev, 1)   # 1 = manual, AGC off
-    if _LIB.rtlsdr_set_tuner_gain(dev, int(round(SDR_GAIN_DB * 10))) != 0:
+    # Gain: manual by default (a fixed level keeps the display stable and
+    # comparable — AGC makes brightness chase around).  AGC may be enabled at
+    # runtime via set_agc() / applet IPC; then the manual gain is ignored by
+    # the tuner.
+    _LIB.rtlsdr_set_tuner_gain_mode(dev, 0 if agc else 1)   # 0 = auto, 1 = manual
+    if not agc and _LIB.rtlsdr_set_tuner_gain(dev, int(round(gain_db * 10))) != 0:
         # Stay in manual mode at the tuner's own default rather than enabling AGC.
-        logging.warning("[SDR] manual gain %.0f dB rejected; keeping tuner default", SDR_GAIN_DB)
+        logging.warning("[SDR] manual gain %.0f dB rejected; keeping tuner default", gain_db)
     _LIB.rtlsdr_reset_buffer(dev)
 
-    return dev, int(eff.value)
+    return dev, int(eff[0])
 
 
 def _close_dongle(dev):
@@ -211,8 +240,9 @@ class SdrWaterfall:
         self.width = int(width)
         self.height = int(height)
         self.center_hz = SDR_CENTER_HZ
-        self.sample_rate = SAMPLE_RATE
+        self.sample_rate = SAMPLE_RATE   # = waterfall bandwidth (S/s)
         self.gain_db = SDR_GAIN_DB
+        self.agc_enabled = False         # manual gain is the default mode
 
         self._state_lock = threading.Lock()
         self._frame_lock = threading.Lock()
@@ -241,7 +271,10 @@ class SdrWaterfall:
                 self.error = "librtlsdr missing"
                 return False
 
-        dev, rate = _open_dongle(self.center_hz, SAMPLE_RATE)
+        # Instance state (not the env-var globals) — runtime tune/gain/bandwidth
+        # changes made while the view was inactive apply on this open.
+        dev, rate = _open_dongle(self.center_hz, self.sample_rate, self.gain_db,
+                                 self.agc_enabled)
         if dev is None:
             self.error = "dongle busy or not found"
             return False
@@ -257,13 +290,17 @@ class SdrWaterfall:
             self._thread = t
             self.active = True
             self.error = ""
+            # The device may have clamped the requested sample rate — trust
+            # what it reports (sweep math + applet readout use this).
+            self.sample_rate = int(rate)
             self._cols_since_open = 0   # each device session recalibrates
             self._ref_lo = None
             self._ref_hi = None
         t.start()
 
-        logging.info("[SDR] opened dongle @ %.1f MHz, %d S/s, gain %.0f dB",
-                     int(self.center_hz) / 1e6, rate, self.gain_db)
+        logging.info("[SDR] opened dongle @ %.1f MHz, %d S/s, gain %.0f dB (AGC %s)",
+                     int(self.center_hz) / 1e6, rate, self.gain_db,
+                     "on" if self.agc_enabled else "off")
         return True
 
     def stop(self):
@@ -287,6 +324,101 @@ class SdrWaterfall:
             self._thread = None
 
         logging.info("[SDR] closed dongle — device free for other programs")
+
+    # -- tuning (applet IPC) ----------------------------------------------
+
+    def tune(self, delta_hz):
+        """Shift the center frequency by `delta_hz` (may be negative).
+
+        The new center is clamped to [TUNE_MIN_HZ, TUNE_MAX_HZ] and stored,
+        so it applies on the next dongle open even while the view is inactive.
+        If the dongle is currently open it is re-tuned live.  Returns the
+        (possibly clamped) new center frequency in Hz."""
+        with self._state_lock:
+            new_center = max(TUNE_MIN_HZ,
+                             min(TUNE_MAX_HZ, self.center_hz + float(delta_hz)))
+            if new_center == self.center_hz:   # already at the clamp bound
+                return self.center_hz
+            self.center_hz = new_center
+            dev = self._dev
+        if dev is not None and _LIB is not None:
+            _apply_center_freq(dev, new_center)
+        return new_center
+
+    def adjust_gain(self, delta_db):
+        """Shift the manual gain by `delta_db` (may be negative).
+
+        Clamped to [GAIN_MIN_DB, GAIN_MAX_DB]; applies live when the dongle
+        is open and on the next open otherwise.  Returns the new gain in dB."""
+        with self._state_lock:
+            new_gain = max(GAIN_MIN_DB,
+                           min(GAIN_MAX_DB, self.gain_db + float(delta_db)))
+            if new_gain == self.gain_db:       # already at the clamp bound
+                return self.gain_db
+            self.gain_db = new_gain
+            dev = self._dev
+        if dev is not None and _LIB is not None:
+            rc = _LIB.rtlsdr_set_tuner_gain(dev, int(round(new_gain * 10)))
+            if rc != 0:
+                logging.warning("[SDR] manual gain %.1f dB rejected (rc=%d)",
+                                new_gain, rc)
+        return new_gain
+
+    def set_center_freq(self, hz):
+        """Set the center frequency absolutely (tune() is the relative form).
+
+        Same clamp / live-apply semantics as tune().  Returns the possibly-
+        clamped new center in Hz."""
+        with self._state_lock:
+            new_center = max(TUNE_MIN_HZ, min(TUNE_MAX_HZ, float(hz)))
+            if new_center == self.center_hz:   # no change (incl. clamp bound)
+                return self.center_hz
+            self.center_hz = new_center
+            dev = self._dev
+        if dev is not None and _LIB is not None:
+            _apply_center_freq(dev, new_center)
+        return new_center
+
+    def set_sample_rate(self, rate_sps):
+        """Set the sample rate (= waterfall bandwidth in S/s).
+
+        Clamped to [BANDWIDTH_MIN_RATE, BANDWIDTH_MAX_RATE]; if the dongle is
+        open it is reconfigured live and the EFFECTIVE rate (the device may
+        clamp) is stored.  Returns the effective rate actually in use."""
+        requested = max(BANDWIDTH_MIN_RATE,
+                        min(BANDWIDTH_MAX_RATE, int(rate_sps)))
+        with self._state_lock:
+            dev = self._dev
+        if dev is None or _LIB is None:
+            # Not open — remember it for the next open.
+            with self._state_lock:
+                self.sample_rate = requested
+            return float(requested)
+
+        if _LIB.rtlsdr_set_sample_rate(dev, requested) != 0:
+            logging.warning("[SDR] set_sample_rate %d S/s rejected", requested)
+        # Read back what actually stuck — the device may clamp the rate.
+        eff = (ctypes.c_uint32 * 1)(0)
+        rc = _LIB.rtlsdr_get_sample_rate(dev, eff)
+        effective = int(eff[0]) if rc == 0 and eff[0] else requested
+        with self._state_lock:
+            self.sample_rate = effective
+        return float(effective)
+
+    def set_agc(self, on):
+        """Enable/disable automatic gain control.
+
+        Manual-gain controls are ignored by the tuner while AGC is on.  Applies
+        live when open; remembered for the next open either way."""
+        with self._state_lock:
+            new = bool(on)
+            if new == self.agc_enabled:   # no change
+                return new
+            self.agc_enabled = new
+            dev = self._dev
+        if dev is not None and _LIB is not None:
+            _LIB.rtlsdr_set_tuner_gain_mode(dev, 0 if new else 1)   # best-effort
+        return new
 
     # -- render side -------------------------------------------------------
 
@@ -374,12 +506,14 @@ class SdrWaterfall:
                 # [negative half][DC..+Nyquist] so the column spans center-
                 # rate/2 .. center+rate/2 with the middle row at center.
                 power = np.abs(np.fft.fft(samples * _HANN)) ** 2
-                if DC_NOTCH_HZ > 0:
+                if DC_NOTCH_HZ > 0 and self.sample_rate > 0:
                     # Mask ±DC_NOTCH_HZ around baseband zero (bin 0 and its
                     # wrap-around neighbours hold the negative offsets).
-                    k = int(round(DC_NOTCH_HZ * CHUNK_SIZE / SAMPLE_RATE))
-                    power[:k + 1] = 0.0
-                    power[-k:] = 0.0
+                    # Instance rate — it can change live via set_sample_rate().
+                    k = int(round(DC_NOTCH_HZ * CHUNK_SIZE / self.sample_rate))
+                    if k >= 1:
+                        power[:k + 1] = 0.0
+                        power[-k:] = 0.0
                 spec_db_full = 10.0 * np.log10(power + 1e-12)
                 spec_db = spec_db_full[_BIN_ORDER]
 

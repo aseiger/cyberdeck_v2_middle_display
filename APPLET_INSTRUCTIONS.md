@@ -42,6 +42,46 @@ field (array of names, position == index). Currently defined views:
 View values outside the registered range are clamped to the nearest valid one.
 
 ```json
+{"type": "sdr", "action": "tune", "delta_hz": 25000}
+```
+Step the SDR waterfall's center frequency by `delta_hz` (signed; positive
+tunes up). Applied live while the dongle is open, otherwise remembered for
+the next open. The server queues it and the daemon's render loop applies it.
+
+```json
+{"type": "sdr", "action": "freq", "hz": 910525000}
+```
+Set the SDR center frequency absolutely (Hz). Clamped to a sane window on
+drop; applied live while the dongle is open.
+
+```json
+{"type": "sdr", "action": "bandwidth", "rate_sps": 3000000}
+```
+Set the sample rate (= waterfall bandwidth, S/s). The RTL2832U + librtlsdr
+only accept roughly 226k–300k or ~901k–3.2M (there is a resampler dead zone
+in between) — anything else is rejected and the previous rate stays in
+effect, which is what status reports back as the EFFECTIVE rate. Refresh
+after sending and trust that value.
+
+```json
+{"type": "sdr", "action": "gain", "delta_db": -1}
+```
+Step the SDR manual gain by `delta_db` dB (signed), clamped to 0–49 dB on
+drop. Same queue/apply semantics as tuning.
+
+```json
+{"type": "sdr", "action": "agc", "on": true}
+```
+Enable/disable automatic gain control. While AGC is on, manual-gain controls
+are ignored by the tuner — reflect that in your UI (e.g. dim the gain
+buttons). The current mode is reported back via status.
+
+**Applet UX rule:** show these tuning controls *only while the active view is
+the SDR screen* — resolve it from the `views` registry by name ("SDR"), not
+by index, and hide them when no registry is advertised or the link is down.
+The current center frequency + gain for a readout arrive in status below.
+
+```json
 {"type": "fluid", "action": "perturb",
  "x": 0.5, "y": 0.7, "strength": 600, "radius": 40,
  "fx": 0.0, "fy": -1.0, "dye": 1.0}
@@ -67,7 +107,9 @@ Request current state from the server.
 
 ```json
 {"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0,
- "view": 0, "views": ["Dashboard", "Fluid", "Repeater"]}
+ "view": 0, "views": ["Dashboard", "Fluid", "Repeater", "SDR"],
+ "sdr": {"center_hz": 910525000, "gain_db": 25.0, "rate_sps": 2000000,
+         "agc": false}}
 ```
 - `brightness`: current main display brightness (0–100, or -1 if never set)
 - `lcd_brightness`: current SPI LCD backlight level (0–100, or -1 if never set)
@@ -76,6 +118,12 @@ Request current state from the server.
 - `views`: the daemon's screen registry — a JSON array of name strings in
   view-index order. The server is the source of truth for screens and their
   names; do not hardcode your own list. New screens appear here automatically.
+- `sdr` (optional): the SDR waterfall's tuning state — `center_hz` in Hz,
+  `gain_db` in dB, `rate_sps` (sample rate = bandwidth; span is ±half around
+  center), `agc` (bool). `null` until the daemon has reported it, absent on
+  older daemons. Refresh after sending any `sdr` message to pick up the new
+  values — especially for `bandwidth`, where the device may clamp what you
+  asked for.
 
 The server also sends an initial `status` response automatically when a new client connects.
 
