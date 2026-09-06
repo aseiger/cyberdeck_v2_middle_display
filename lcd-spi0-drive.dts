@@ -1,0 +1,53 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * lcd-spi0-drive.dtbo — max drive strength + fast slew for RP1 SPI0 pads.
+ *
+ * The Pi 5's header SPI0 is RP1's SPI0. Its firmware pin config sets
+ * drive-strength/slew-rate only on gpio9-11 (MOSI/MISO/CS1) and leaves
+ * gpio7-8 (CS0/SCLK) at the 4 mA / slow-slew pad defaults, which gives
+ * marginal SCK edges at ~20 MHz and corrupts the 2.4" ST7789 LCD
+ * (white screen, worst on the SDR waterfall view).
+ *
+ * fragment@0 adds a pinconf node for all five SPI pads (12 mA, fast
+ * slew); fragment@1 appends it to the SPI controller's pinctrl-0 state
+ * so the maps are actually applied (unreferenced pinctrl child nodes
+ * produce no maps). The 0x2c / 0x2d cells are the phandles of the
+ * firmware's existing rp1_spi0_gpio9 / rp1_spi0_cs_gpio7 nodes in the
+ * current module DTB — if a firmware update renumbers phandles and the
+ * LCD stops working, re-read them from:
+ *   /sys/firmware/devicetree/base/axi/pcie@1000120000/rp1/spi@50000/pinctrl-0
+ *
+ * Verify after reboot:
+ *   grep -E "pin (7|8|9|10|11) " /sys/kernel/debug/pinctrl/1f000d0000.gpio-pinctrl-rp1/pinconf-pins
+ * all five should read 12 mA, slew rate 0x1.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	fragment@0 {
+		target-path = "/axi/pcie@1000120000/rp1/gpio@d0000";
+
+		__overlay__ {
+			lcd_spi0_drive: lcd_spi0_drive {
+				pins = "gpio7", "gpio8", "gpio9",
+				       "gpio10", "gpio11";
+				function = "spi0";
+				drive-strength = <12>;
+				slew-rate = <1>;
+			};
+		};
+	};
+
+	fragment@1 {
+		target-path = "/axi/pcie@1000120000/rp1/spi@50000";
+
+		__overlay__ {
+			/* original firmware state nodes + ours, appended */
+			pinctrl-0 = <0x2c 0x2d &lcd_spi0_drive>;
+		};
+	};
+};

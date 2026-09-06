@@ -159,14 +159,23 @@ DISPLAY_POLL_INTERVAL_SECONDS = 0.25
 # View 1 pacing: the work (physics + render + SPI push) is the limiter; no
 # extra sleep is needed.
 FLUID_FRAME_INTERVAL_SECONDS = 0.0
-FLUID_SPI_HZ = 28000000  # fluid-view ceiling: 28 MHz renders, 30 MHz corrupts (white).
-# 28 MHz = fastest confirmed-rendering speed = brightest (shorter SPI bursts
-# = less sustained 5V backlight sag = less dimming/flicker). If you ever see a
-# white flash at this rate, that's the ~30 MHz signal cliff — drop to 24.
+# Single SPI clock for ALL views (init + every view switch). Keep every
+# speed reference here — do not hard-code SPI rates elsewhere in this file.
+# History: 28 MHz corrupted the panel (white screen) while the SCLK/CS0
+# pads (RP1 gpio7/8) were stuck at 4 mA drive / slow slew; the
+# lcd-spi0-drive overlay raises them to 12 mA / fast, which cleared the
+# cliff: 50/80 MHz verified clean. 100 MHz (200 MHz clk_sys / 2, the RP1
+# max) corrupts the panel — and 100 MHz also exceeds the ST7789's 80 MHz
+# spec. NOTE: the RP1 SSI divisor grid from the 200 MHz core clock is
+# 100/50/40/33.3/25/20 MHz — requests between grid points (e.g. 80) are
+# silently clamped DOWN to the nearest grid rate (80 -> 50). If white
+# screens ever return, verify the overlay with:
+#   grep -E "pin (7|8|9|10|11) " /sys/kernel/debug/pinctrl/1f000d0000.gpio-pinctrl-rp1/pinconf-pins
 # NOTE: the per-update brightness pulse is NOT a rate problem — it's the 5V
 # backlight sagging under SPI load (proven: frozen gray flickers, frozen black
-# stays solid). Higher rate only shortens the dip; decouple backlight power to
-# kill it. 28 MHz is the highest rate that doesn't corrupt the panel.
+# stays solid). A higher rate only shortens the dip; decouple backlight power
+# to kill it. If you raise this, verify with tests/fluid_sweep_test.py first.
+SPI_FREQ_HZ = 50000000
 logging.basicConfig(level=logging.DEBUG)
 
 case_fan = None
@@ -301,11 +310,9 @@ try:
     ''' Warning!!!Don't  creation of multiple displayer objects!!! '''
     # bl_freq=5000: run the backlight on 5 kHz hardware PWM — well above the
     # perceptible-flicker range (1 kHz was the previous default).
-    # 28 MHz base: fastest confirmed-rendering speed = brightest (shorter SPI
-    # bursts = less sustained 5V backlight sag). Stays under the ~30 MHz signal
-    # cliff. The permanent fix for dimming is still power decoupling on the LCD
-    # 5V rail, but 28 MHz is the brightest the software side can get.
-    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=28000000,rst=RST,dc=DC,bl=BL,bl_freq=5000)
+    # SPI clock: SPI_FREQ_HZ — uniform across all views. The permanent fix
+    # for dimming is still power decoupling on the LCD 5V rail.
+    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=SPI_FREQ_HZ,rst=RST,dc=DC,bl=BL,bl_freq=5000)
     # disp = LCD_2inch4.LCD_2inch4()
     # Brief settle before we drive the reset line (safety net; the real
     # blank-on-restart fix is the corrected ST7789 reset settle time in
@@ -494,13 +501,9 @@ try:
                     row=ev.get("row"),
                 )
 
-        # Full-frame pushes are bandwidth-bound: run the SPI faster in the
-        # fluid and SDR views (both push full frames), restore the
-        # conservative rate for the dashboard.
-        if disp.SPI is not None:
-            want_speed = FLUID_SPI_HZ if current_view in (1, 3) else disp.SPEED
-            if disp.SPI.max_speed_hz != want_speed:
-                disp.SPI.max_speed_hz = want_speed
+        # SPI clock is fixed at SPI_FREQ_HZ for all views — it must never be
+        # retuned per view (the old per-view speed bump is what caused the
+        # white screen on view changes).
 
         image1 = background_image.copy()
         draw = ImageDraw.Draw(image1)
