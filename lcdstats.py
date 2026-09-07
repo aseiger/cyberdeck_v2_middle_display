@@ -166,9 +166,11 @@ FLUID_FRAME_INTERVAL_SECONDS = 0.0
 # lcd-spi0-drive overlay raises them to 12 mA / fast, which cleared the
 # cliff: 50/80 MHz verified clean. 100 MHz (200 MHz clk_sys / 2, the RP1
 # max) corrupts the panel — and 100 MHz also exceeds the ST7789's 80 MHz
-# spec. NOTE: the RP1 SSI divisor grid from the 200 MHz core clock is
-# 100/50/40/33.3/25/20 MHz — requests between grid points (e.g. 80) are
-# silently clamped DOWN to the nearest grid rate (80 -> 50). If white
+# spec. NOTE: the controller is the DesignWare SSI (dw_spi_mmio) off the
+# 200 MHz clk_sys, with an EVEN divisor 2..65534 — reachable rates are
+# 100/50/33.3/25/20/16.7/14.3/12.5/11.1/10/9.1/... MHz (down to ~3 kHz).
+# Requests between grid points are silently clamped DOWN (e.g. 80 -> 50;
+# 40 MHz is unreachable, it would need an odd divisor). If white
 # screens ever return, verify the overlay with:
 #   grep -E "pin (7|8|9|10|11) " /sys/kernel/debug/pinctrl/1f000d0000.gpio-pinctrl-rp1/pinconf-pins
 # NOTE: the per-update brightness pulse is NOT a rate problem — it's the 5V
@@ -176,6 +178,11 @@ FLUID_FRAME_INTERVAL_SECONDS = 0.0
 # stays solid). A higher rate only shortens the dip; decouple backlight power
 # to kill it. If you raise this, verify with tests/fluid_sweep_test.py first.
 SPI_FREQ_HZ = 50000000
+# SPI clock for the one-shot controller init sequence only (LCD_2inch4.Init).
+# The clock jumps back up to SPI_FREQ_HZ as soon as init completes, before
+# the first GRAM write. 10 MHz is exactly on the SSI grid (200 MHz / 20,
+# even divisor — verified by timing probe, Sep 2025).
+INIT_SPI_FREQ_HZ = 10000000
 logging.basicConfig(level=logging.DEBUG)
 
 case_fan = None
@@ -310,9 +317,10 @@ try:
     ''' Warning!!!Don't  creation of multiple displayer objects!!! '''
     # bl_freq=5000: run the backlight on 5 kHz hardware PWM — well above the
     # perceptible-flicker range (1 kHz was the previous default).
-    # SPI clock: SPI_FREQ_HZ — uniform across all views. The permanent fix
+    # SPI clock: SPI_FREQ_HZ for GRAM writes (uniform across all views);
+    # the one-shot init sequence runs at INIT_SPI_FREQ_HZ. The permanent fix
     # for dimming is still power decoupling on the LCD 5V rail.
-    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=SPI_FREQ_HZ,rst=RST,dc=DC,bl=BL,bl_freq=5000)
+    disp = LCD_2inch4.LCD_2inch4(spi=SPI.SpiDev(bus, device),spi_freq=SPI_FREQ_HZ,spi_init_freq=INIT_SPI_FREQ_HZ,rst=RST,dc=DC,bl=BL,bl_freq=5000)
     # disp = LCD_2inch4.LCD_2inch4()
     # Brief settle before we drive the reset line (safety net; the real
     # blank-on-restart fix is the corrected ST7789 reset settle time in
@@ -538,7 +546,8 @@ try:
 
         # SPI clock is fixed at SPI_FREQ_HZ for all views — it must never be
         # retuned per view (the old per-view speed bump is what caused the
-        # white screen on view changes).
+        # white screen on view changes). The only speed change is the one-shot
+        # drop to INIT_SPI_FREQ_HZ inside disp.Init() at startup.
 
         image1 = background_image.copy()
         draw = ImageDraw.Draw(image1)

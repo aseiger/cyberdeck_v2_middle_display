@@ -128,7 +128,9 @@ class LCD_2inch4(lcdconfig.RaspberryPi):
         self.data(0x0F)#
         self.command(0x29)#'''Display on'''
 
-  
+        # Init sequence done — switch the SPI clock up to the full GRAM rate.
+        self.set_spi_speed(self.SPEED)
+
     def SetWindows(self, Xstart, Ystart, Xend, Yend):
         #set the X coordinates
         self.command(0x2A)

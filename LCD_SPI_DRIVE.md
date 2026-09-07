@@ -93,12 +93,17 @@ awk '/^device 1f00050000.spi/{f=1} f' /sys/kernel/debug/pinctrl/pinctrl-maps \
    (big-endian 32-bit cells; they should be the phandles of
    `rp1_spi0_gpio9` / `rp1_spi0_cs_gpio7` under `.../rp1/gpio@d0000`.)
 
-3. **RP1 SPI rate grid.** SCLK comes from the 200 MHz core clock through
-   an integer divisor: achievable rates are 100 / 50 / 40 / 33.3 / 25 /
-   20 MHz. Requests between grid points (e.g. 80 MHz) are silently
-   **clamped down** (80 → 50). The 100 MHz maximum also exceeds the
-   ST7789's 80 MHz spec and corrupts the panel on this wiring.
-   Verified clean: 50 MHz (`SPI_FREQ_HZ` in `lcdstats.py`).
+3. **RP1 SPI rate grid.** The controller is the DesignWare SSI
+   (`dw_spi_mmio`, `snps,dw-apb-ssi`) clocked from the 200 MHz `clk_sys`
+   through an **even** divisor (2 … 65534): achievable rates are
+   100 / 50 / 33.3 / 25 / 20 / 16.7 / 14.3 / 12.5 / 11.1 / 10 / 9.1 / …
+   MHz, down to ~3 kHz. (40 MHz is *unreachable* — it would need the odd
+   divisor 5.) Requests between grid points are silently **clamped down**
+   (80 → 50, since ÷2.5 is not an even divisor). The 100 MHz maximum also
+   exceeds the ST7789's 80 MHz spec and corrupts the panel on this wiring.
+   Verified clean: 50 MHz (`SPI_FREQ_HZ` in `lcdstats.py`); 10 MHz verified
+   by transfer-timing probe (1 MiB xfer ≈ 918 ms, exactly 2× the 20 MHz
+   time).
 
 ## Rollback
 

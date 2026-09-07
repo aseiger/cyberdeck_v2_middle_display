@@ -240,12 +240,13 @@ class HardwarePWM:
 
 
 class RaspberryPi:
-    def __init__(self,spi=spidev.SpiDev(0,0),spi_freq=40000000,rst = 27,dc = 25,bl = 18,bl_freq=5000,i2c=None,i2c_freq=100000):
+    def __init__(self,spi=spidev.SpiDev(0,0),spi_freq=40000000,spi_init_freq=10000000,rst = 27,dc = 25,bl = 18,bl_freq=5000,i2c=None,i2c_freq=100000):
         self.np=np
         self.INPUT = False
         self.OUTPUT = True
 
         self.SPEED  =spi_freq
+        self.INIT_SPEED = spi_init_freq   # slower clock for the init sequence
         self.BL_freq=bl_freq
 
         self.RST_PIN= self.gpio_mode(rst,self.OUTPUT)
@@ -295,6 +296,11 @@ class RaspberryPi:
         if self.SPI!=None :
             self.SPI.writebytes(data)
 
+    def set_spi_speed(self, hz):
+        """Change the SPI clock to *hz* (takes effect from the next transfer)."""
+        if self.SPI!=None :
+            self.SPI.max_speed_hz = hz
+
     def bl_DutyCycle(self, duty):
         self.BL_PIN.value = duty / 100
         
@@ -302,8 +308,10 @@ class RaspberryPi:
         self.BL_PIN.frequency = freq
            
     def module_init(self):
+        # Start the controller init sequence at the slower init clock; the
+        # driver's Init() bumps it up to self.SPEED once init is complete.
         if self.SPI!=None :
-            self.SPI.max_speed_hz = self.SPEED        
+            self.SPI.max_speed_hz = self.INIT_SPEED
             self.SPI.mode = 0b00     
         return 0
 
