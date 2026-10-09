@@ -165,8 +165,7 @@ class LCD_2inch4(lcdconfig.RaspberryPi):
             self.data(0x78) 
             self.SetWindows ( 0, 0, self.width, self.height)
             self.digital_write(self.DC_PIN,True)
-            for i in range(0,len(pix),4096):
-                self.spi_writebyte(pix[i:i+4096])
+            self.spi_writebyte(pix)   # single full-duplex transfer
             
         else :
             img = self.np.asarray(Image)
@@ -180,8 +179,7 @@ class LCD_2inch4(lcdconfig.RaspberryPi):
             self.data(0x08) 
             self.SetWindows ( 0, 0, self.width, self.height)
             self.digital_write(self.DC_PIN,True)
-            for i in range(0,len(pix),4096):
-                self.spi_writebyte(pix[i:i+4096])
+            self.spi_writebyte(pix)   # single full-duplex transfer
 
     def clear(self):
         """Clear contents of image buffer"""
@@ -189,8 +187,7 @@ class LCD_2inch4(lcdconfig.RaspberryPi):
         time.sleep(0.02)
         self.SetWindows ( 0, 0, self.width, self.height)
         self.digital_write(self.DC_PIN,True)
-        for i in range(0,len(_buffer),4096):
-            self.spi_writebyte(_buffer[i:i+4096])	
+        self.spi_writebyte(_buffer)   # single full-duplex transfer
 
     def clear_color(self,color):
         """Clear contents of image buffer"""
@@ -198,5 +195,4 @@ class LCD_2inch4(lcdconfig.RaspberryPi):
         time.sleep(0.02)
         self.SetWindows ( 0, 0, self.width, self.height)
         self.digital_write(self.DC_PIN,True)
-        for i in range(0,len(_buffer),4096):
-            self.spi_writebyte(_buffer[i:i+4096])
+        self.spi_writebyte(_buffer)   # single full-duplex transfer

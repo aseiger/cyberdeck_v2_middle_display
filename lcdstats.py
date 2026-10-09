@@ -112,8 +112,7 @@ def ShowImageRegion(display, image, x_start, y_start):
     display.data(0x08)
     display.SetWindows(x_start, y_start, x_start + width, y_start + height)
     display.digital_write(display.DC_PIN, True)
-    for offset in range(0, len(buffer), 4096):
-        display.spi_writebyte(buffer[offset:offset + 4096])
+    display.spi_writebyte(buffer)   # single full-duplex transfer (xfer3)
 
 
 class FanTachometer:
@@ -180,9 +179,14 @@ FLUID_FRAME_INTERVAL_SECONDS = 0.0
 SPI_FREQ_HZ = 50000000
 # SPI clock for the one-shot controller init sequence only (LCD_2inch4.Init).
 # The clock jumps back up to SPI_FREQ_HZ as soon as init completes, before
-# the first GRAM write. 10 MHz is exactly on the SSI grid (200 MHz / 20,
-# even divisor — verified by timing probe, Sep 2025).
-INIT_SPI_FREQ_HZ = 10000000
+# the first GRAM write. 1 MHz is exactly on the SSI grid (200 MHz / 200,
+# even divisor). Slowed 10x from 10 MHz (2026-10): panel came up white at
+# boot with init running at 10 MHz even with the 12 mA / fast-slew overlay
+# in place (verified via pinconf-pins); 1 MHz gives the ST7789 a very
+# comfortable margin for its command-only init phase. The whole init
+# sequence is ~75 SPI bytes, so the extra ~0.5 ms is negligible next to
+# the 170 ms reset settle time.
+INIT_SPI_FREQ_HZ = 1000000
 logging.basicConfig(level=logging.DEBUG)
 
 case_fan = None

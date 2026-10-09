@@ -294,7 +294,12 @@ class RaspberryPi:
 
     def spi_writebyte(self, data):
         if self.SPI!=None :
-            self.SPI.writebytes(data)
+            # Full-duplex xfer3, NOT TX-only writebytes. RP1 firmware
+            # 28.33+ corrupts the ST7789 (white screen) after many 4096-byte
+            # TX-only transfers; full-duplex transfers are unaffected. MISO is
+            # unconnected on this panel, so the returned bytes are ignored.
+            # Repro/fix: tests/single_transfer_test.py.
+            self.SPI.xfer3(data)
 
     def set_spi_speed(self, hz):
         """Change the SPI clock to *hz* (takes effect from the next transfer)."""
