@@ -172,11 +172,17 @@ FLUID_FRAME_INTERVAL_SECONDS = 0.0
 # 40 MHz is unreachable, it would need an odd divisor). If white
 # screens ever return, verify the overlay with:
 #   grep -E "pin (7|8|9|10|11) " /sys/kernel/debug/pinctrl/1f000d0000.gpio-pinctrl-rp1/pinconf-pins
-# NOTE: the per-update brightness pulse is NOT a rate problem — it's the 5V
-# backlight sagging under SPI load (proven: frozen gray flickers, frozen black
-# stays solid). A higher rate only shortens the dip; decouple backlight power
-# to kill it. If you raise this, verify with tests/fluid_sweep_test.py first.
-SPI_FREQ_HZ = 50000000
+# BRIGHTNESS TRADE-OFF (why 25 MHz, not 50): the backlight is powered from the
+# same 5V rail the SSI/panel load. A higher SCLK rate draws harder peak
+# current, so it sags that rail DEEPER on every update and the backlight runs
+# dimmer (not just a shorter dip). 50 MHz (bumped 2026-09-06) made the deck
+# visibly ~2x dimmer than the old 28/25 MHz; 25 MHz restores the bright state
+# and is still fast for the tile-based updates (full frame ~49 ms / ~20 fps
+# worst case; steady-state is small tile bursts). Permanent fix: decouple the
+# backlight power (cap or separate rail) so 50 MHz runs without the sag. If
+# you raise this, verify with tests/fluid_sweep_test.py first AND re-check
+# backlight brightness — it will dim again.
+SPI_FREQ_HZ = 25000000
 # SPI clock for the one-shot controller init sequence only (LCD_2inch4.Init).
 # The clock jumps back up to SPI_FREQ_HZ as soon as init completes, before
 # the first GRAM write. 1 MHz is exactly on the SSI grid (200 MHz / 200,
