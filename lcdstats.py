@@ -187,6 +187,16 @@ SPI_FREQ_HZ = 50000000
 # sequence is ~75 SPI bytes, so the extra ~0.5 ms is negligible next to
 # the 170 ms reset settle time.
 INIT_SPI_FREQ_HZ = 1000000
+# SPI clock for the one-shot boot-time FULL-FRAME writes (clear_color + the
+# first ShowImage). The SSI TX FIFO underruns under heavy CPU load: at 50 MHz
+# a 64-byte FIFO only holds ~10 us of data, so a boot-storm preemption (dockerd
+# + openhop + network all starting at once) starves it and the SSI clocks
+# all-ones -> GRAM 0xFFFF -> white screen. Confirmed: first frame is white
+# under 75% CPU load at 50 MHz, clean at 1 MHz. 1 MHz gives a ~512 us FIFO
+# margin that survives boot-storm preemptions. Cost: ~1.2 s per full frame,
+# paid once at startup (backlight is off until the first frame anyway).
+# We switch back up to SPI_FREQ_HZ right after the first frame lands.
+BOOT_SPI_FREQ_HZ = 1000000
 logging.basicConfig(level=logging.DEBUG)
 
 case_fan = None
@@ -332,6 +342,12 @@ try:
     time.sleep(1.5)
     # Initialize library.
     disp.Init()
+    # Run the boot-time full-frame writes (clear_color + first ShowImage) at
+    # the slow, load-robust BOOT_SPI_FREQ_HZ. Init() left the clock at
+    # SPI_FREQ_HZ; drop it now so the clear + first frame survive the boot
+    # storm. Switched back up to SPI_FREQ_HZ right after the first frame
+    # lands (see the main loop below).
+    disp.set_spi_speed(BOOT_SPI_FREQ_HZ)
     # Baseline the panel to BLACK (not white) so there's no white content in
     # GRAM before the first frame. Backlight is still OFF here so it's
     # invisible — but if any tearing/frame-delay shows old content when the
@@ -862,6 +878,11 @@ try:
             # own — and dropping the redundant full-screen rewrite also removes
             # the one-frame flicker it used to cause.)
             disp.ShowImage(image1)
+            # First full frame landed — switch the SPI clock back up to the
+            # fast GRAM rate for ongoing tile updates. The boot-time writes
+            # (clear + this frame) ran at BOOT_SPI_FREQ_HZ to survive the boot
+            # storm; steady-state load is light enough for SPI_FREQ_HZ.
+            disp.set_spi_speed(SPI_FREQ_HZ)
             # Give the panel a beat to finish displaying the first frame before
             # we light the backlight, so no partial/old content shows through.
             time.sleep(0.25)
