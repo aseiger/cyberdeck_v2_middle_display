@@ -172,15 +172,18 @@ FLUID_FRAME_INTERVAL_SECONDS = 0.0
 # 40 MHz is unreachable, it would need an odd divisor). If white
 # screens ever return, verify the overlay with:
 #   grep -E "pin (7|8|9|10|11) " /sys/kernel/debug/pinctrl/1f000d0000.gpio-pinctrl-rp1/pinconf-pins
-# BRIGHTNESS TRADE-OFF: the backlight is powered from the same 5V rail the
-# SSI/panel load. A higher SCLK rate draws harder peak current, so it sags
-# that rail deeper on every update and the backlight runs dimmer (A/B
-# confirmed 2026-10: 50 MHz is visibly dimmer than 25 MHz — user chose 50
-# anyway for the smoother fluid/waterfall frames, full frame ~24.5 ms / ~40
-# fps worst case). Set SPI_FREQ_HZ = 25000000 for the brighter backlight if
-# the dimming bothers you. Permanent fix: decouple the backlight power (cap
-# or separate rail) so 50 MHz runs without the sag. If you change this,
-# verify with tests/fluid_sweep_test.py first.
+# BRIGHTNESS NOTE: the backlight shares the 5V rail with the SSI/panel load,
+# so SPI activity sags it (documented: a frozen gray screen flickers, frozen
+# black is steady). A HIGHER rate shortens each dip, so it runs at least as
+# bright as a lower one (an A/B of 25 vs 50 MHz was inconclusive; the deck
+# looks bright at 50). We run 50 MHz for the smoothest fluid/waterfall
+# frames (full frame ~24.5 ms / ~40 fps worst case). If the backlight ever
+# looks dim, check in order: (1) the applet's lcd_brightness value (it can
+# set <100 — see journalctl "LCD brightness ->"), (2) the PWM duty (cat
+# /sys/class/pwm/pwmchip0/pwm2/{duty_cycle,period}, want duty==period),
+# (3) the 5V rail voltage under load (multimeter). Permanent fix for the
+# sag: decouple the backlight power (cap or separate rail). If you change
+# this rate, verify with tests/fluid_sweep_test.py first.
 SPI_FREQ_HZ = 50000000
 # SPI clock for the one-shot controller init sequence only (LCD_2inch4.Init).
 # The clock jumps back up to SPI_FREQ_HZ as soon as init completes, before
