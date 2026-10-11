@@ -172,19 +172,23 @@ FLUID_FRAME_INTERVAL_SECONDS = 0.0
 # 40 MHz is unreachable, it would need an odd divisor). If white
 # screens ever return, verify the overlay with:
 #   grep -E "pin (7|8|9|10|11) " /sys/kernel/debug/pinctrl/1f000d0000.gpio-pinctrl-rp1/pinconf-pins
-# BRIGHTNESS NOTE: the backlight shares the 5V rail with the SSI/panel load,
-# so SPI activity sags it (documented: a frozen gray screen flickers, frozen
-# black is steady). A HIGHER rate shortens each dip, so it runs at least as
-# bright as a lower one (an A/B of 25 vs 50 MHz was inconclusive; the deck
-# looks bright at 50). We run 50 MHz for the smoothest fluid/waterfall
-# frames (full frame ~24.5 ms / ~40 fps worst case). If the backlight ever
-# looks dim, check in order: (1) the applet's lcd_brightness value (it can
-# set <100 — see journalctl "LCD brightness ->"), (2) the PWM duty (cat
-# /sys/class/pwm/pwmchip0/pwm2/{duty_cycle,period}, want duty==period),
-# (3) the 5V rail voltage under load (multimeter). Permanent fix for the
-# sag: decouple the backlight power (cap or separate rail). If you change
-# this rate, verify with tests/fluid_sweep_test.py first.
-SPI_FREQ_HZ = 50000000
+# BRIGHTNESS / SAG NOTE (measured with tests/camera_sag_test.py, 2026-10-11):
+# The Waveshare module is all 3.3 V, and the backlight white LEDs sit only
+# ~0.1-0.2 V above Vf, so the burst current of every SPI transfer dips the
+# 3.3 V and the backlight dims with it. Measured sag vs GRAM rate (locked-
+# exposure camera, static frame, idle vs back-to-back pushes):
+#   10 MHz: 2.7%   20 MHz: 5.2%   25 MHz: 8.5%   33 MHz: 8.2%   50 MHz: 13.7%
+# We run 10 MHz on purpose: the sag is then barely perceptible. Cost: a full
+# frame takes ~123 ms (~8 fps worst case), so the fluid/waterfall views are
+# choppier. Once the backlight moves to a 5 V supply (more headroom — the
+# planned fix) or gets a bulk decoupling cap at the connector, re-run
+# tests/camera_sag_test.py to pick a higher rate. If you change the rate,
+# verify rendering with tests/fluid_sweep_test.py first. If the backlight
+# ever looks dim for OTHER reasons, check in order: (1) the applet's
+# lcd_brightness (journalctl -u lcdstats | grep "LCD brightness"), (2) the
+# PWM duty (cat /sys/class/pwm/pwmchip0/pwm2/{duty_cycle,period}, want
+# duty==period).
+SPI_FREQ_HZ = 10000000
 # SPI clock for the one-shot controller init sequence only (LCD_2inch4.Init).
 # The clock jumps back up to SPI_FREQ_HZ as soon as init completes, before
 # the first GRAM write. 1 MHz is exactly on the SSI grid (200 MHz / 200,
