@@ -83,16 +83,39 @@ External clients can connect to the Unix domain socket at `/tmp/lcdstats.sock` u
 {"type": "brightness", "value": 75}
 {"type": "lcd_brightness", "value": 75}
 {"type": "volume", "value": 50}
+{"type": "view", "value": 4}
 {"type": "get_status"}
 ```
 
 - `brightness` — main display brightness (0–100)
 - `lcd_brightness` — SPI LCD backlight duty cycle (0–100), independent of the main display brightness
+- `view` — select a screen by index (see Screens below); out-of-range values clamp to the nearest valid screen
 
 **Server → Client:**
 
 ```json
-{"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0, "view": 0}
+{"type": "status", "brightness": 75.0, "lcd_brightness": 75.0, "volume": 50.0, "view": 0,
+ "views": ["Dashboard", "Fluid", "Repeater", "SDR", "Map"]}
+```
+
+## Screens
+
+The screen list lives in one place — `VIEWS` in `display_server.py` — and is
+advertised to every client in the `views` field of each status message, so a
+client can cycle screens without hardcoding how many there are. Each entry has
+a matching render branch in `lcdstats.py`.
+
+| # | Name | What it shows |
+|---|---|---|
+| 0 | Dashboard | Clock, GPS (fix / signal / GPS-time), network, CPU, memory, disk, fans, battery |
+| 1 | Fluid | Live 2-D pixel fluid sim; keyboard presses pour water (see `keywater.py`) |
+| 2 | Repeater | MeshCore/openhop repeater status and a live packet feed |
+| 3 | SDR | RTL-SDR spectrum waterfall — the dongle is opened only while this screen is up |
+| 4 | Map | Heading-up moving map: GPS status header, then the map rotated so travel direction points up, scrolling under a fixed centre marker. See [docs/gps-map.md](docs/gps-map.md) |
+
+```bash
+# Switch screens from the shell:
+python3 -c "import json,socket; s=socket.socket(socket.AF_UNIX); s.connect('/tmp/lcdstats.sock'); s.sendall(json.dumps({'type':'view','value':4}).encode()+b'\n')"
 ```
 
 ## Project Structure
@@ -102,7 +125,8 @@ External clients can connect to the Unix domain socket at `/tmp/lcdstats.sock` u
 | `lcdstats.py` | Main application — renders the stats dashboard to the LCD |
 | `display_server.py` | Unix domain socket IPC server for brightness/volume control |
 | `systemStats.py` | Threaded system statistics collector (CPU, memory, disk, network, etc.) |
-| `gpsStats.py` | Threaded GPS status collector (fix status & satellite count via `gpsd`) |
+| `gpsStats.py` | Threaded GPS status collector (fix status, satellites, speed/course, accuracy via `gpsd`) |
+| `gpsMap.py` | Heading-up moving map for the Map screen: tile cache (local-first + async online), position/heading estimator, mosaic + rotation renderer |
 | `gaugeWidget.py` | Half-circle analog gauge drawing widget |
 | `lcdstats.service` | systemd unit file for running at boot |
 | `lib/` | Waveshare LCD driver library (SPI, GPIO, hardware PWM) |

@@ -21,6 +21,7 @@ import json
 import systemStats
 import batteryStats
 import gpsStats
+import gpsMap
 import repeaterStats
 import display_server
 from pixfluid import PixFluid
@@ -262,11 +263,12 @@ gps_collector = None
 repeater_collector = None
 sdr_wf = None
 disp = None
+map_tiles = None          # view 4 tile fetcher (see gpsMap.TileCache)
 
 
 def cleanup_and_exit(signum=None, frame=None):
     """Force peripherals to a safe state during service stop/shutdown."""
-    global case_fan, fan_tach, ipc_server, gps_collector, repeater_collector, sdr_wf, disp
+    global case_fan, fan_tach, ipc_server, gps_collector, repeater_collector, sdr_wf, disp, map_tiles
 
     if case_fan is not None:
         try:
@@ -308,6 +310,16 @@ def cleanup_and_exit(signum=None, frame=None):
             pass
         finally:
             repeater_collector = None
+
+    if map_tiles is not None:
+        # Stop the tile fetcher threads (and any in-flight HTTP request) with
+        # the applet, so a service restart does not leave downloaders running.
+        try:
+            map_tiles.stop()
+        except Exception:
+            pass
+        finally:
+            map_tiles = None
 
     if sdr_wf is not None:
         # Release the RTL-SDR dongle on shutdown so other programs can use it.
@@ -476,6 +488,19 @@ try:
     gps_collector = gpsStats.GPSStatisticsCollector()
     # View 2: openhop-repeater status (polls http://127.0.0.1:8000/api/stats).
     repeater_collector = repeaterStats.RepeaterStatisticsCollector()
+
+    # View 4: heading-up moving map (gpsMap.py). Tiles come from the local
+    # tile caches first and the network second, always on a background thread
+    # so a missing tile never stalls the SPI loop. The estimator turns ~1 Hz
+    # gpsd fixes into continuous motion; see gpsMap for the details.
+    MAP_LEFT = 4                     # inside the 5 px panel border
+    MAP_TOP = 46                     # below the two-line GPS status header
+    MAP_W = disp.width - 2 * MAP_LEFT
+    MAP_H = disp.height - MAP_TOP - 6
+    map_tiles = gpsMap.TileCache()
+    map_est = gpsMap.PositionEstimator()
+    map_zoom = gpsMap.ZoomController()
+    moving_map = gpsMap.MovingMap(map_tiles, MAP_W, MAP_H)
     battery_collector = None
     next_battery_init_attempt = 0.0
 
@@ -579,6 +604,22 @@ try:
                 sdr_wf.start()
         elif not sdr_wanted and sdr_wf.active:
             sdr_wf.stop()
+
+        # View 4 owns no hardware, but it must not download tiles for a screen
+        # nobody is looking at: the fetcher threads only run while it is shown.
+        map_wanted = (current_view == 4)
+        if map_wanted and not map_tiles.running:
+            map_tiles.start()
+        elif not map_wanted and map_tiles.running:
+            map_tiles.stop()
+
+        # Feed position/heading every loop even when the map is hidden, so
+        # opening the view shows a settled heading instead of one that has to
+        # converge in front of you.
+        if gps_collector.Connected and gps_collector.FixMode >= 2:
+            map_est.update(gps_collector.Latitude, gps_collector.Longitude,
+                           gps_collector.SpeedMPS, gps_collector.Track)
+            map_zoom.update(gps_collector.SpeedMPS)
 
         # Apply fluid events queued by applet clients (perturb / reset)
         for ev in ipc_server.drain_fluid_events():
@@ -939,6 +980,62 @@ try:
                 msg = sdr_wf.error or "acquiring..."
                 draw.text((LPad + 30, disp.height // 2), msg[:16], fill="RED", font=SmallFont)
 
+        elif current_view == 4:
+            # View 4: heading-up moving map. gpsMap does the tiles and the
+            # rotation; here we lay out the GPS status header, paste the map
+            # window, and draw the marker/scale bar on top. The vehicle marker
+            # is fixed at the centre of the screen — the map slides and swings
+            # underneath it, with the direction of travel always pointing up.
+            sample = map_est.sample()
+            zoom = map_zoom.zoom
+
+            if gps_collector.Connected and sample is not None:
+                gps_fix_text = gps_collector.FixText
+                has_fix = gps_collector.FixMode >= 2
+                fix_color = "GREEN" if has_fix else "YELLOW"
+            else:
+                gps_fix_text, has_fix, fix_color = "No GPS", False, "RED"
+
+            # Header: line 1 fix / ground speed / heading (trailing H = the
+            # heading is being held because we are too slow for course over
+            # ground to mean anything); line 2 satellites, reported accuracy,
+            # zoom and tile-source state. Format lives in gpsMap so the preview
+            # tool cannot drift from it.
+            line1, line2 = gpsMap.map_header_lines(
+                gps_fix_text,
+                sample.speed_mps if sample else 0.0,
+                sample.heading if sample else None,
+                bool(sample and sample.heading_held),
+                gps_collector.SatsUsed if gps_collector.Connected else 0,
+                gps_collector.SatsVisible if gps_collector.Connected else 0,
+                gps_collector.PosErrorM if gps_collector.Connected else 0.0,
+                zoom, online=map_tiles.online, pending=map_tiles.pending)
+            draw.text((LPad, 6), line1, fill=fix_color, font=SmallFont)
+            draw.text((LPad, 6 + SmallFontSize + 1), line2,
+                      fill=(170, 170, 170), font=TinyFont)
+            draw.line([(0, MAP_TOP - 4), (240, MAP_TOP - 4)], fill=DividerColor, width=2)
+
+            if sample is None:
+                # No usable position yet: dark ground plus an explanation.
+                draw.rectangle([MAP_LEFT, MAP_TOP, MAP_LEFT + MAP_W, MAP_TOP + MAP_H],
+                               fill=gpsMap.MISSING_TILE_RGB)
+                draw.text((LPad + 46, MAP_TOP + MAP_H // 2 - 9), "NO GPS FIX",
+                          fill="RED", font=SmallFont)
+            else:
+                map_img, map_info = moving_map.render(sample.lat, sample.lon,
+                                                      sample.heading, zoom)
+                image1.paste(map_img, (MAP_LEFT, MAP_TOP))
+
+                # Tell the fetcher which tile we are over so it pulls that one
+                # first and a ring around it, and drops tiles we drove past.
+                wx, wy = gpsMap.lonlat_to_world_px(sample.lat, sample.lon, zoom)
+                map_tiles.set_focus(zoom, int(wx // gpsMap.TILE_SIZE),
+                                    int(wy // gpsMap.TILE_SIZE))
+
+                # Marker, north tick, scale bar (shared with the preview tool).
+                gpsMap.draw_map_overlay(draw, sample, map_info,
+                                        (MAP_LEFT, MAP_TOP, MAP_W, MAP_H), TinyFont)
+
         else:
             # Unknown view — draw a placeholder
             draw.text((LPad, drawpos), f"View {current_view}", fill="WHITE", font=FontBig)
@@ -966,13 +1063,14 @@ try:
                 disp.bl_DutyCycle(ipc_server.lcd_brightness)
                 last_lcd_brightness = ipc_server.lcd_brightness
         else:
-            tile = 32 if current_view == 1 else 16
+            tile = 32 if current_view in (1, 4) else 16
             for region in ChangedTileRegions(displayed_image, image1, tile):
                 left, top, right, bottom = region
                 ShowImageRegion(disp, image1.crop(region), left, top)
         displayed_image = image1
         
-        if current_view in (1, 3):
+        if current_view in (1, 3, 4):
+            # Animated views: no artificial pause — the SPI write is the pacing.
             time.sleep(FLUID_FRAME_INTERVAL_SECONDS)
         else:
             time.sleep(DISPLAY_POLL_INTERVAL_SECONDS)

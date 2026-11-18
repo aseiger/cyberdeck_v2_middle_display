@@ -8,6 +8,7 @@
 #
 
 import json
+import math
 import socket
 import threading
 import time
@@ -43,6 +44,8 @@ class GPSStatisticsCollector:
         self._lat = 0.0
         self._lon = 0.0
         self._speed_mps = 0.0   # meters per second
+        self._track = None      # course over ground, degrees true (None = unknown)
+        self._pos_error_m = 0.0  # reported horizontal position uncertainty
         self._hdop = 0.0
         self._nmea_last_seen = 0.0
 
@@ -138,6 +141,23 @@ class GPSStatisticsCollector:
             return self._speed_mps * 3.6
 
     @property
+    def Track(self):
+        """Course over ground in degrees true, or None when not reported.
+
+        Meaningless below walking pace — the receiver cannot tell which way it
+        is pointed without motion. gpsMap holds the last good value instead of
+        trusting this under ~1.5 m/s.
+        """
+        with self._lock:
+            return self._track
+
+    @property
+    def PosErrorM(self):
+        """Reported horizontal position uncertainty in metres (0 if unknown)."""
+        with self._lock:
+            return self._pos_error_m
+
+    @property
     def HDOP(self):
         """Horizontal dilution of precision (lower is better)."""
         with self._lock:
@@ -169,6 +189,8 @@ class GPSStatisticsCollector:
             self._lat = 0.0
             self._lon = 0.0
             self._speed_mps = 0.0
+            self._track = None
+            self._pos_error_m = 0.0
             self._hdop = 0.0
             self._nmea_last_seen = 0.0
 
@@ -236,6 +258,14 @@ class GPSStatisticsCollector:
                 self._lat = float(report.get("lat", 0.0) or 0.0)
                 self._lon = float(report.get("lon", 0.0) or 0.0)
                 self._speed_mps = float(report.get("speed", 0.0) or 0.0)
+                track = report.get("track")
+                try:
+                    self._track = None if track is None else float(track)
+                except (TypeError, ValueError):
+                    self._track = None
+                epx = float(report.get("epx", 0.0) or 0.0)
+                epy = float(report.get("epy", 0.0) or 0.0)
+                self._pos_error_m = math.hypot(epx, epy)
                 self._hdop = float(report.get("hdop", 0.0) or 0.0)
                 self._last_update = time.monotonic()
                 self._nmea_last_seen = time.monotonic()
