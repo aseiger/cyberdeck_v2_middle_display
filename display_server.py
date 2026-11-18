@@ -34,7 +34,7 @@ Client -> Server messages:
 
 Server -> Client messages (sent in response to get_status):
   {"type": "status", "brightness": 75, "lcd_brightness": 75, "volume": 50,
-   "view": 0, "views": ["Dashboard", "Fluid", "Repeater", "SDR"],
+   "view": 0, "views": ["Dashboard", "Fluid", "Repeater", "SDR", "Map"],
    "sdr": {"center_hz": 910525000, "gain_db": 25.0, "rate_sps": 2000000,
            "agc": false}}                        # SDR tuning state (null until
                                                  #   the daemon has reported it)
@@ -60,6 +60,7 @@ VIEWS = [
     "Fluid",      # 1: live pixel fluid simulation
     "Repeater",   # 2: openhop repeater status + packet feed
     "SDR",        # 3: RTL-SDR spectrum waterfall (dongle open only while shown)
+    "Map",        # 4: heading-up moving map (tiles local-first, GPS-disciplined)
 ]
 
 SOCKET_PATH = "/tmp/lcdstats.sock"

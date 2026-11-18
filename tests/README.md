@@ -44,6 +44,13 @@ python tests/<name>.py
 | --- | --- |
 | `test_fluid.py` | Headless test for fluidsim: renders frames to `/tmp/fluid_test/`, exercises `perturb()`/`reset()`, benchmarks `step()`/`render()`. |
 
+## GPS moving map (view 4, headless — no panel, but reads the tile caches)
+
+| Script | Purpose |
+| --- | --- |
+| `test_gps_map.py` | Checks for `gpsMap.py`: rotation convention (landmarks at known offsets must land up/left/down/right), smooth dead‑reckoned scroll between ~1 Hz fixes, heading hold below walking speed, zoom hysteresis, tile source (local‑first, never blocks, synthesis of z15/z16 from the z17 cache), and ms/frame against the panel budget. `--online` adds a real tile fetch, prefetch ring and stale‑prefetch cancel. |
+| `map_view_preview.py` | Renders what view 4 looks like to `/tmp/gpsmap-test/view-preview.png` using the same helpers the view uses — live gpsd position, or pass `lat lon`, `--zoom`, `--online`. |
+
 > Heads‑up: the SPI/backlight probes write to the physical panel and touch the
 > backlight pin. Don't run them blindly while the `lcdstats` service is the
 > thing you want on screen.
