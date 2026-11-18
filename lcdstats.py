@@ -139,6 +139,50 @@ class FanTachometer:
         return pulses / self._pulses_per_rev / dt * 60.0
 
 
+class KernelAuxFan:
+    """Read-only RPM accessor for the aux fan, served by the auxfan kernel
+    module as a standard it87-style hwmon device (name == "auxfan",
+    fan1_input).  When the module is active it OWNS the fan: PWM output,
+    tach counting and control (the module's kernel auto loop, or
+    alx_fancontrol taking the channel over via pwm1_enable) all happen
+    outside this applet - display-only, never writes to the driver.
+    """
+    HWMON_ROOT = "/sys/class/hwmon"
+    _path = None
+    _last_rpm = 0.0
+
+    @classmethod
+    def _resolve(cls):
+        """Locate /sys/class/hwmon/hwmonN/fan1_input by device name
+        (hwmon indices are unstable across reboots)."""
+        import glob
+        cls._path = None
+        for d in sorted(glob.glob(cls.HWMON_ROOT + "/hwmon*")):
+            try:
+                with open(d + "/name") as f:
+                    if f.read().strip() == "auxfan":
+                        cls._path = d + "/fan1_input"
+                        return
+            except OSError:
+                pass
+
+    @classmethod
+    def available(cls):
+        cls._resolve()
+        return cls._path is not None
+
+    def read_rpm(self):
+        self._resolve()  # re-resolve every tick: cheap, index-proof
+        if self._path is None:
+            return self._last_rpm
+        try:
+            with open(self._path) as f:
+                self._last_rpm = float(f.read().strip() or 0)
+        except OSError:
+            pass
+        return self._last_rpm
+
+
 # Raspberry Pi pin configuration:
 RST = 27
 DC = 25
@@ -410,8 +454,21 @@ try:
                              sdr_wf.sample_rate, sdr_wf.agc_enabled)
     last_sdr_reported = (sdr_wf.center_hz, sdr_wf.gain_db,
                          sdr_wf.sample_rate, sdr_wf.agc_enabled)
-    case_fan = HardwarePWM(CASE_FAN, frequency=1000)
-    case_fan.value = 0.0
+    if KernelAuxFan.available():
+        # The auxfan kernel module owns the fan: PWM output, tach counting
+        # and the control loop run in-kernel (auto mode, curve loaded by
+        # auxfan.service). This applet is display-only for the aux fan.
+        case_fan = None
+        fan_tach = KernelAuxFan()
+        logging.info("Aux fan: kernel driver (auxfan.ko) active - display-only")
+    else:
+        # Fallback: original userspace control, used only when the auxfan
+        # kernel module is not loaded.
+        case_fan = HardwarePWM(CASE_FAN, frequency=1000)
+        case_fan.value = 0.0
+        fan_tach = FanTachometer(FAN_TACH, pulses_per_rev=AUX_FAN_PULSES_PER_REV)
+        logging.info("Aux fan: kernel driver absent - userspace PWM on GPIO %d",
+                     CASE_FAN)
 
     i = 0
     
@@ -421,7 +478,6 @@ try:
     repeater_collector = repeaterStats.RepeaterStatisticsCollector()
     battery_collector = None
     next_battery_init_attempt = 0.0
-    fan_tach = FanTachometer(FAN_TACH, pulses_per_rev=AUX_FAN_PULSES_PER_REV)
 
     # Load PWM→RPM lookup table
     aux_fan_curve = None
@@ -478,24 +534,28 @@ try:
             except (OSError, ValueError):
                 pass
 
-        # --- Aux fan: lookup-table control ---
+        # --- Aux fan: lookup-table control (userspace fallback only).  When
+        # the auxfan kernel module is active it owns the control loop
+        # in-kernel (auto mode); this block is then skipped entirely. ---
         aux_fan_rpm = fan_tach.read_rpm()
-        target_rpm = cpu_fan_rpm * AUX_FAN_TARGET_RPM_RATIO
 
-        if aux_fan_curve:
-            # Reverse-lookup: find the PWM duty that produces target_rpm
-            # by interpolating the stored PWM→RPM curve.
-            target_duty = _rpm_to_duty(target_rpm, aux_fan_curve)
-        else:
-            # Fallback: linear approximation (0% PWM → 0 RPM, 100% → max RPM)
-            target_duty = min(1.0, target_rpm / 5000.0)
+        if case_fan is not None:
+            target_rpm = cpu_fan_rpm * AUX_FAN_TARGET_RPM_RATIO
 
-        alpha = min(dt / AUX_FAN_SMOOTHING_TIME, 1.0)
-        smoothed_aux_duty += alpha * (target_duty - smoothed_aux_duty)
-        new_duty = max(0.0, min(1.0, smoothed_aux_duty))
-        if abs(new_duty - last_aux_duty) > 0.01:
-            case_fan.value = new_duty
-            last_aux_duty = new_duty
+            if aux_fan_curve:
+                # Reverse-lookup: find the PWM duty that produces target_rpm
+                # by interpolating the stored PWM→RPM curve.
+                target_duty = _rpm_to_duty(target_rpm, aux_fan_curve)
+            else:
+                # Fallback: linear approximation (0% PWM → 0 RPM, 100% → max RPM)
+                target_duty = min(1.0, target_rpm / 5000.0)
+
+            alpha = min(dt / AUX_FAN_SMOOTHING_TIME, 1.0)
+            smoothed_aux_duty += alpha * (target_duty - smoothed_aux_duty)
+            new_duty = max(0.0, min(1.0, smoothed_aux_duty))
+            if abs(new_duty - last_aux_duty) > 0.01:
+                case_fan.value = new_duty
+                last_aux_duty = new_duty
 
 
         # Sync SPI LCD backlight with the dedicated lcd_brightness value.
