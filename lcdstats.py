@@ -679,26 +679,28 @@ try:
                 gps_has_fix = gps_collector.FixMode >= 2
                 gps_color = "GREEN" if gps_has_fix else "YELLOW"
                 gps_signal_text = f"{gps_collector.SatsUsed}/{gps_collector.SatsVisible}"
-                gps_clock_governed = gps_collector.ClockGoverned
+                gps_time_ok = gps_collector.TimeFromGPS
             else:
                 gps_fix_text = "No GPS"
                 gps_color = "RED"
                 gps_signal_text = "--/--"
-                gps_clock_governed = False
+                gps_time_ok = False
 
             draw.text((gps_x, gps_y), "GPS", fill="CYAN", font=GPSFont)
 
-            # Clock-governed indicator: small circle to the right of "GPS"
-            # Green = clock is GPS-disciplined, red = not
+            # GPS-time indicator: small circle to the right of "GPS"
+            # Green = gpsd has fresh per-second time from the receiver
+            # (PPS/TOFF), red = no time strobe. It does NOT mean the Pi's
+            # system clock is slewed to GPS — that needs a refclock consumer.
             clock_blink_x = gps_x + 32
             clock_blink_y = gps_y + 7
-            clock_color = "GREEN" if gps_clock_governed else "RED"
-            draw.ellipse([clock_blink_x, clock_blink_y, clock_blink_x + 6, clock_blink_y + 6], fill=clock_color)
+            time_color = "GREEN" if gps_time_ok else "RED"
+            draw.ellipse([clock_blink_x, clock_blink_y, clock_blink_x + 6, clock_blink_y + 6], fill=time_color)
             draw.text((gps_x, gps_y + gps_line), f"Fix {gps_fix_text}", fill=gps_color, font=GPSFont)
             draw.text((gps_x, gps_y + gps_line * 2), f"Sig {gps_signal_text}", fill=gps_color, font=GPSFont)
-            clock_text = "YES" if gps_clock_governed else "NO"
-            clock_text_color = "GREEN" if gps_clock_governed else "RED"
-            draw.text((gps_x, gps_y + gps_line * 3), f"Clock {clock_text}", fill=clock_text_color, font=GPSFont)
+            time_text = "YES" if gps_time_ok else "NO"
+            time_text_color = "GREEN" if gps_time_ok else "RED"
+            draw.text((gps_x, gps_y + gps_line * 3), f"Time {time_text}", fill=time_text_color, font=GPSFont)
 
             drawpos = drawpos + FontBigSize + TextPadding
 

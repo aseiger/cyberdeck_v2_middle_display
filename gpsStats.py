@@ -77,11 +77,14 @@ class GPSStatisticsCollector:
 
     @property
     def PPSActive(self):
-        """True when gpsd has delivered a 1PPS pulse recently.
+        """True when gpsd has delivered a per-second time strobe recently.
 
-        A live PPS stream means the receiver's precise per-second edge is
-        reaching gpsd, which is what lets the system clock be disciplined
-        to GPS time.
+        This covers both a hardware 1PPS edge (PPS report) and gpsd's TOFF
+        report, which is the offset between the receiver's fix time and the
+        host clock. TOFF arrives at ~1 Hz from many receivers with no 1PPS
+        wiring at all, so True here means "gpsd has fresh per-second time
+        from the receiver" - NOT "the system clock is disciplined to GPS".
+        See TimeFromGPS.
         """
         with self._lock:
             if not self._connected or self._pps_last_seen == 0.0:
@@ -89,12 +92,14 @@ class GPSStatisticsCollector:
             return (time.monotonic() - self._pps_last_seen) < self._pps_timeout_seconds
 
     @property
-    def ClockGoverned(self):
-        """True when the system clock is likely being disciplined by GPS.
+    def TimeFromGPS(self):
+        """True when gpsd has a valid fix AND fresh per-second GPS time.
 
-        Requires both a valid fix (2D or 3D) AND active PPS — i.e. the
-        receiver has a position lock and the hardware 1PPS edge is
-        reaching gpsd.
+        Requires a position lock (2D or 3D) plus a PPS/TOFF strobe within
+        the last pps_timeout_seconds. Says nothing about whether the host
+        clock is actually slewed to GPS — that needs a refclock consumer
+        (e.g. gpsd SHM/DUMMY + chrony). Named to avoid implying discipline
+        it does not measure.
         """
         with self._lock:
             if not self._connected:
@@ -175,8 +180,11 @@ class GPSStatisticsCollector:
                     (self._host, self._port), timeout=5.0
                 )
                 sock.settimeout(5.0)
+                # "pps":true is REQUIRED for gpsd to forward PPS/TOFF reports
+                # to this socket. Without it we never see a time strobe and
+                # TimeFromGPS can never go True, no matter how good the fix.
                 sock.sendall(
-                    b'?WATCH={"enable":true,"json":true};\n'
+                    b'?WATCH={"enable":true,"json":true,"pps":true};\n'
                 )
                 with self._lock:
                     self._connected = True
@@ -261,7 +269,8 @@ def main(args):
             f"connected={collector.Connected} "
             f"fix={collector.FixText} "
             f"sats={collector.SatsUsed}/{collector.SatsVisible} "
-            f"pps={collector.PPSActive}"
+            f"pps={collector.PPSActive} "
+            f"time_from_gps={collector.TimeFromGPS}"
         )
         time.sleep(1)
     return 0
